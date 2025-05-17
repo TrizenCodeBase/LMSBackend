@@ -23,14 +23,18 @@ const app = express();
 
 // Middleware
 app.use(express.json());
+const allowedOrigins = ['http://localhost:3000', 'https://lms.trizenventures.com/'];
+
 app.use(cors({
-  origin: [
-    'http://localhost:3000',
-    'https://lms.trizenventures.com/'
-  ],
+  origin: function (origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   credentials: true
 }));
-
 
 // Create uploads directory if it doesn't exist
 const uploadsDir = path.join(__dirname, 'uploads');
