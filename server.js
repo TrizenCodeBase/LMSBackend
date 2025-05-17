@@ -65,7 +65,7 @@ const storage = multer.diskStorage({
   }
 });
 
-const upload = multer({ storage });
+const upload = multer({ storage,limits: { fileSize: 1000 * 1024 * 1024 } });
 
 // Serve static files from uploads directory
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
@@ -3407,7 +3407,7 @@ const s3Client = new S3Client({
 mdf.listBuckets(minioClient);
 
 // Video upload endpoint with memory storage for processing files from frontend
-const videoUpload = multer({ storage: multer.memoryStorage() });
+const videoUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 1000 * 1024 * 1024 } });
 
 // Video upload endpoint - updated to use AWS SDK with Upload class
 app.post('/api/upload/video', authenticateToken, videoUpload.single('video'), async (req, res) => {
@@ -4226,5 +4226,20 @@ app.put('/api/notifications/mark-all-read', authenticateToken, async (req, res) 
   } catch (error) {
     console.error('Error marking all notifications as read:', error);
     res.status(500).json({ message: 'Failed to mark all notifications as read' });
+  }
+});
+// 👇 Place this near the bottom of server.js
+app.post('/api/upload/video', upload.single('video'), (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ message: 'No video file uploaded' });
+    }
+
+    // You can customize where/how the file is saved/processed
+    const videoPath = `/uploads/${req.file.filename}`;
+    res.status(200).json({ message: 'Video uploaded successfully', videoPath });
+  } catch (err) {
+    console.error('Video upload error:', err);
+    res.status(500).json({ message: 'Server error during video upload' });
   }
 });
