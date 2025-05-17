@@ -24,9 +24,13 @@ const app = express();
 // Middleware
 app.use(express.json());
 app.use(cors({
-  origin: 'https://lms.trizenventures.com/',
+  origin: [
+    'http://localhost:3000',
+    'https://lms.trizenventures.com/'
+  ],
   credentials: true
 }));
+
 
 // Create uploads directory if it doesn't exist
 const uploadsDir = path.join(__dirname, 'uploads');
