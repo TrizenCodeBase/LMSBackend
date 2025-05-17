@@ -34,11 +34,11 @@ const app = express();
         //   },
         //   credentials: true
         // }));
-        const corsOptions = {
-          origin: 'https://lms.trizenventures.com',
-          methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-          credentials: true,
-          allowedHeaders: ['Content-Type', 'Authorization']
+ const corsOptions = {
+    origin: 'https://lms.trizenventures.com',
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    credentials: true,
+    allowedHeaders: ['Content-Type', 'Authorization']
 };
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
