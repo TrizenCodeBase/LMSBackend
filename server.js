@@ -22,21 +22,30 @@ dotenv.config();
 const app = express();
 
 // Middleware
+// const allowedOrigins = ['http://localhost:3000', 'https://lms.trizenventures.com/'];
+
+// app.use(cors({
+  //   origin: function (origin, callback) {
+    //     if (!origin || allowedOrigins.includes(origin)) {
+      //       callback(null, true);
+      //     } else {
+        //       callback(new Error('Not allowed by CORS'));
+        //     }
+        //   },
+        //   credentials: true
+        // }));
+        const corsOptions = {
+          origin: 'https://lms.trizenventures.com',
+          methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+          credentials: true,
+          allowedHeaders: ['Content-Type', 'Authorization']
+};
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 app.use(express.json());
-const allowedOrigins = ['http://localhost:3000', 'https://lms.trizenventures.com/'];
+app.use(express.urlencoded({ extended: true }));
 
-app.use(cors({
-  origin: function (origin, callback) {
-    if (!origin || allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
-  credentials: true
-}));
-
-app.options('*', cors()); // handle preflight
+// app.options('*', cors()); // handle preflight
 
 // Create uploads directory if it doesn't exist
 const uploadsDir = path.join(__dirname, 'uploads');
