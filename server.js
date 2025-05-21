@@ -8,12 +8,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const nodemailer = require('nodemailer');
-// Add Minio, AWS SDK and mdf requires
-const Minio = require('minio');
-const mdf = require('./mdf');
-const busboy = require('busboy');
-const { S3Client } = require('@aws-sdk/client-s3');
-const { Upload } = require('@aws-sdk/lib-storage');
+const { uploadPaymentScreenshot, getFileUrl } = require('./minioClient');
 
 // Load environment variables
 dotenv.config();
@@ -22,32 +17,8 @@ dotenv.config();
 const app = express();
 
 // Middleware
-// const allowedOrigins = ['http://localhost:3000', 'https://lms.trizenventures.com/'];
-
-// app.use(cors({
-  //   origin: function (origin, callback) {
-    //     if (!origin || allowedOrigins.includes(origin)) {
-      //       callback(null, true);
-      //     } else {
-        //       callback(new Error('Not allowed by CORS'));
-        //     }
-        //   },
-        //   credentials: true
-        // }));
- const corsOptions = {
-    origin: 'https://lms.trizenventures.com',
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    credentials: true,
-    allowedHeaders: ['Content-Type', 'Authorization']
-};
-app.use(cors(corsOptions));
-app.options('*', cors(corsOptions));
-// app.use(express.json());
-// app.use(express.urlencoded({ extended: true }));
-app.use(express.json({ limit: '5000mb' }));
-app.use(express.urlencoded({ limit: '50000mb', extended: true }));
-
-// app.options('*', cors()); // handle preflight
+app.use(express.json());
+app.use(cors());
 
 // Create uploads directory if it doesn't exist
 const uploadsDir = path.join(__dirname, 'uploads');
@@ -55,30 +26,20 @@ if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
-// Configure multer for file uploads
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, uploadsDir);
-  },
-  filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    const ext = path.extname(file.originalname);
-    cb(null, file.fieldname + '-' + uniqueSuffix + ext);
-  }
-});
-
-const upload = multer({ storage,limits: { fileSize: 1000 * 1024 * 1024 } });
+// Configure multer for memory storage
+const storage = multer.memoryStorage();
+const upload = multer({ storage });
 
 // Serve static files from uploads directory
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Enable CORS for image requests
-// app.use((req, res, next) => {
-//   res.header('Access-Control-Allow-Origin', 'origin');
-//   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-//   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
-//   next();
-// });
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  next();
+});
 
 // Connect to MongoDB
 mongoose.connect(process.env.MongoDB_URL)
@@ -90,7 +51,7 @@ const User = require('./models/User');
 const Course = require('./models/Course');
 const UserCourse = require('./models/UserCourse');
 const Discussion = require('./models/Discussion');
-const SupportTicket = require('./models/SupportTicket');
+
 const Notification = require('./models/Notification');
 const QuizSubmission = require('./models/QuizSubmission');
 
@@ -272,18 +233,11 @@ const sendEnrollmentApprovalEmail = async (enrollmentRequest) => {
 // Signup
 app.post('/api/auth/signup', async (req, res) => {
   try {
-    const { name, email, password, role, specialty, experience } = req.body;
+    const { name, email, password, role } = req.body;
 
     // Validate required fields
     if (!name || !email || !password) {
       return res.status(400).json({ message: 'Required fields missing' });
-    }
-
-    // Additional validation for instructor signup
-    if (role === 'instructor' && (!specialty || !experience)) {
-      return res.status(400).json({ 
-        message: 'Specialty and experience required for instructor signup' 
-      });
     }
 
     // Check if email exists
@@ -301,20 +255,9 @@ app.post('/api/auth/signup', async (req, res) => {
       name,
       email,
       password: hashedPassword,
-      role: role || 'student',
+      role: role === 'admin' ? 'admin' : 'student', // Only allow student or admin roles
       displayName: name
     };
-
-    // Add instructor profile if role is instructor
-    if (role === 'instructor') {
-      userData.instructorProfile = {
-        specialty,
-        experience,
-        rating: 0,
-        totalReviews: 0,
-        courses: []
-      };
-    }
 
     const user = new User(userData);
     await user.save();
@@ -339,105 +282,6 @@ app.post('/api/auth/signup', async (req, res) => {
   }
 });
 
-// Add this route after the existing signup route
-app.post('/api/auth/instructor-signup', async (req, res) => {
-  try {
-    const { name, email, password, specialty, experience } = req.body;
-
-    // Validate required fields
-    if (!name || !email || !password || !specialty || !experience) {
-      return res.status(400).json({ message: 'All fields are required' });
-    }
-
-    // Check if email already exists
-    const existingUser = await User.findOne({ email });
-    if (existingUser) {
-      return res.status(400).json({ message: 'Email already registered' });
-    }
-
-    // Hash password
-    const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(password, salt);
-
-    // Create new instructor
-    const instructor = new User({
-      name,
-      email,
-      password: hashedPassword,
-      role: 'instructor',
-      status: 'pending',
-      displayName: name,
-      instructorProfile: {
-        specialty,
-        experience: Number(experience),
-        rating: 0,
-        totalReviews: 0,
-        courses: []
-      }
-    });
-
-    await instructor.save();
-
-    // Create token
-    const token = jwt.sign({ id: instructor._id, role: instructor.role }, JWT_SECRET, { expiresIn: '1d' });
-
-    // Send welcome email
-    try {
-      const mailOptions = {
-        from: `"Trizen Team" <${process.env.EMAIL_USER}>`,
-        to: instructor.email,
-        subject: 'Welcome to Trizen - Instructor Application Received',
-        html: `
-          <div style="font-family: Arial, sans-serif; color: #333;">
-            <h2 style="color: #007BFF;">Welcome to Trizen!</h2>
-            <p>Dear ${name},</p>
-            <p>Thank you for applying to become an instructor at Trizen. We're excited to have you join our teaching community!</p>
-            <p>Your application is currently under review. Here's what happens next:</p>
-            <ul>
-              <li>Our team will review your application and credentials</li>
-              <li>You'll receive an email once your application is approved</li>
-              <li>After approval, you can start creating and publishing courses</li>
-            </ul>
-            <p>While you wait, you can:</p>
-            <ul>
-              <li>Complete your instructor profile</li>
-              <li>Prepare your course materials</li>
-              <li>Review our instructor guidelines</li>
-            </ul>
-            <p>If you have any questions, feel free to contact our support team.</p>
-            <p>Best regards,<br>The Trizen Team</p>
-          </div>
-        `
-      };
-
-      await transporter.sendMail(mailOptions);
-    } catch (emailError) {
-      console.error('Failed to send welcome email:', emailError);
-      // Continue with the signup process even if email fails
-    }
-
-    // Send response
-    res.status(201).json({
-      message: 'Instructor application submitted successfully',
-      token,
-      user: {
-        id: instructor._id,
-        name: instructor.name,
-        email: instructor.email,
-        role: instructor.role,
-        status: instructor.status
-      }
-    });
-
-  } catch (error) {
-    console.error('Instructor signup error:', error);
-    res.status(500).json({ 
-      message: 'Failed to create instructor account. Please try again.',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
-  }
-});
-
 // Login
 app.post('/api/auth/login', async (req, res) => {
   try {
@@ -455,32 +299,24 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(400).json({ message: 'Invalid credentials' });
     }
 
-    // Check instructor status
+    // Reject instructor logins
     if (user.role === 'instructor') {
-      if (user.status === 'rejected') {
-        return res.status(403).json({ 
-          message: 'Your instructor application has been rejected. Please contact support for more information.' 
-        });
-      }
-      if (user.status === 'pending') {
-        return res.status(403).json({ 
-          message: 'Your instructor application is still pending approval. We will notify you once it is approved.' 
-        });
-      }
+      return res.status(403).json({ 
+        message: 'Instructor accounts are no longer supported.' 
+      });
     }
 
     // Create token
     const token = jwt.sign({ id: user._id, role: user.role }, JWT_SECRET, { expiresIn: '1d' });
 
-    // Send response with role and status information
+    // Send response
     res.json({
       token,
       user: {
         id: user._id,
         name: user.name,
         email: user.email,
-        role: user.role,
-        status: user.status
+        role: user.role
       }
     });
 
@@ -862,7 +698,7 @@ app.get('/api/my-courses', authenticateToken, async (req, res) => {
 // Update course progress and status
 app.put('/api/my-courses/:courseId/progress', authenticateToken, async (req, res) => {
   try {
-    const { progress, status } = req.body;
+    const { progress, status, dayNumber } = req.body;
     const { courseId } = req.params;
     
     if (progress < 0 || progress > 100) {
@@ -877,6 +713,35 @@ app.put('/api/my-courses/:courseId/progress', authenticateToken, async (req, res
     
     if (!enrollment) {
       return res.status(404).json({ message: 'Enrollment not found' });
+    }
+
+    // If marking a day as complete, validate the order
+    if (dayNumber) {
+      const completedDays = enrollment.completedDays || [];
+      
+      // For day 1, no validation needed
+      if (dayNumber > 1) {
+        // Check if previous day is completed
+        if (!completedDays.includes(dayNumber - 1)) {
+          return res.status(400).json({ 
+            message: 'Cannot complete this day until previous day is completed' 
+          });
+        }
+      }
+
+      // Update completedDays array
+      if (!completedDays.includes(dayNumber)) {
+        enrollment.completedDays = [...completedDays, dayNumber].sort((a, b) => a - b);
+      } else {
+        // If removing completion, validate it won't break the sequence
+        const nextDay = dayNumber + 1;
+        if (completedDays.includes(nextDay)) {
+          return res.status(400).json({
+            message: 'Cannot mark this day as incomplete while next day is complete'
+          });
+        }
+        enrollment.completedDays = completedDays.filter(d => d !== dayNumber);
+      }
     }
     
     // Update enrollment progress
@@ -908,7 +773,8 @@ app.put('/api/my-courses/:courseId/progress', authenticateToken, async (req, res
         progress: enrollment.progress,
         status: enrollment.status,
         enrolledAt: enrollment.enrolledAt,
-        lastAccessedAt: enrollment.lastAccessedAt
+        lastAccessedAt: enrollment.lastAccessedAt,
+        completedDays: enrollment.completedDays
       }
     });
     
@@ -942,6 +808,9 @@ app.post('/api/enrollment-requests', authenticateToken, upload.single('transacti
     if (!email || !mobile || !utrNumber || !courseName || !courseId || !req.file) {
       return res.status(400).json({ message: 'All fields and file are required' });
     }
+
+    // Upload file to Minio
+    const screenshotPath = await uploadPaymentScreenshot(req.file, req.file.originalname);
     
     const enrollmentRequest = new EnrollmentRequest({
       userId: req.user.id,
@@ -950,7 +819,7 @@ app.post('/api/enrollment-requests', authenticateToken, upload.single('transacti
       mobile,
       courseName,
       utrNumber,
-      transactionScreenshot: `/uploads/${req.file.filename}`,
+      transactionScreenshot: screenshotPath,
       status: 'pending',
     });
     
@@ -2001,529 +1870,6 @@ app.get('/api/courses/:courseId/reviews', async (req, res) => {
   }
 });
 
-// Create a new course (instructor only)
-app.post('/api/instructor/courses', authenticateToken, async (req, res) => {
-  try {
-    // Verify user is an instructor
-    if (req.user.role !== 'instructor') {
-      return res.status(403).json({ message: 'Access denied. Only instructors can create courses.' });
-    }
-
-    const { 
-      title, 
-      description, 
-      longDescription,
-      image,
-      duration,
-      level,
-      category,
-      skills,
-      roadmap,
-      courseAccess
-    } = req.body;
-
-    // Validate required fields
-    if (!title || !description || !image || !duration || !level || !category) {
-      return res.status(400).json({ message: 'Missing required fields' });
-    }
-
-    // Validate roadmap if provided
-    if (roadmap) {
-      if (!Array.isArray(roadmap)) {
-        return res.status(400).json({ message: 'Roadmap must be an array' });
-      }
-      
-      for (let i = 0; i < roadmap.length; i++) {
-        const day = roadmap[i];
-        if (!day.topics || !day.video) {
-          return res.status(400).json({ 
-            message: `Day ${i + 1} in roadmap is missing required fields (topics and video)` 
-          });
-        }
-      }
-    }
-
-    // Create new course
-    const course = new Course({
-      title,
-      description,
-      longDescription: longDescription || description,
-      image,
-      instructor: req.user.name,
-      instructorId: req.user._id,
-      duration,
-      rating: 0,
-      students: 0,
-      level,
-      category,
-      skills: skills || [],
-      roadmap: roadmap || [],
-      courseAccess: courseAccess !== undefined ? courseAccess : true,
-      modules: [],
-      reviews: []
-    });
-
-    await course.save();
-
-    // Add course to instructor's profile
-    if (!req.user.instructorProfile.courses) {
-      req.user.instructorProfile.courses = [];
-    }
-    req.user.instructorProfile.courses.push(course._id);
-    await req.user.save();
-
-    // Create notifications for enrolled students
-    const enrollments = await UserCourse.find({ courseId: course._id });
-    for (const enrollment of enrollments) {
-      if (enrollment.userId.toString() !== req.user.id) {
-        await createNotification({
-          userId: enrollment.userId,
-          type: 'course_update',
-          title: 'New Course Content',
-          message: `New content has been added to ${course.title}`,
-          courseId: course._id,
-          link: `/courses/${course._id}`
-        });
-      }
-    }
-
-    res.status(201).json({ 
-      message: 'Course created successfully',
-      course
-    });
-  } catch (error) {
-    console.error('Create course error:', error);
-    res.status(500).json({ message: 'Server error' });
-  }
-});
-
-// Get instructor's courses
-app.get('/api/instructor/courses', authenticateToken, async (req, res) => {
-  try {
-    // Verify user is an instructor
-    if (req.user.role !== 'instructor') {
-      return res.status(403).json({ message: 'Access denied. Only instructors can access their courses.' });
-    }
-
-    const courses = await Course.find({ instructorId: req.user._id });
-    res.json(courses);
-  } catch (error) {
-    console.error('Get instructor courses error:', error);
-    res.status(500).json({ message: 'Server error' });
-  }
-});
-
-// Get students for a specific course (instructor only)
-app.get('/api/instructor/courses/:courseId/students', authenticateToken, async (req, res) => {
-  try {
-    // Verify user is an instructor
-    if (req.user.role !== 'instructor') {
-      return res.status(403).json({ message: 'Access denied. Only instructors can access student data.' });
-    }
-
-    // Find the course and verify instructor owns it
-    const course = await Course.findById(req.params.courseId);
-    
-    if (!course) {
-      return res.status(404).json({ message: 'Course not found' });
-    }
-    
-    if (course.instructorId.toString() !== req.user.id) {
-      return res.status(403).json({ message: 'Access denied. You can only view students for your own courses.' });
-    }
-
-    // Get all enrollments for this course
-    const enrollments = await UserCourse.find({ 
-      courseId: req.params.courseId 
-    }).populate('userId', 'name email createdAt');
-    
-    // Format the response
-    const students = enrollments.map(enrollment => {
-      // Calculate last active time (for demo, using random recent times)
-      const lastActiveOptions = ['Just now', '5 minutes ago', '1 hour ago', 'Today', 'Yesterday', '3 days ago', '1 week ago'];
-      const randomLastActive = lastActiveOptions[Math.floor(Math.random() * lastActiveOptions.length)];
-      
-      return {
-        id: enrollment.userId._id,
-        name: enrollment.userId.name,
-        email: enrollment.userId.email,
-        enrolledDate: enrollment.enrolledAt,
-        progress: enrollment.progress || 0,
-        status: enrollment.status,
-        lastActive: randomLastActive
-      };
-    });
-    
-    res.json({
-      id: course._id,
-      title: course.title,
-      students: students
-    });
-    
-  } catch (error) {
-    console.error('Get course students error:', error);
-    res.status(500).json({ message: 'Server error' });
-  }
-});
-
-// Update a course (instructor only)
-app.put('/api/instructor/courses/:courseId', authenticateToken, async (req, res) => {
-  try {
-    // Verify user is an instructor
-    if (req.user.role !== 'instructor') {
-      console.log(`Access denied: User ${req.user.id} with role '${req.user.role}' attempted to update course`);
-      return res.status(403).json({ message: 'Access denied. Only instructors can update courses.' });
-    }
-
-    const { courseId } = req.params;
-    
-    // Find the course
-    const course = await Course.findById(courseId);
-    if (!course) {
-      return res.status(404).json({ message: 'Course not found' });
-    }
-
-    // Verify the instructor owns this course
-    if (course.instructorId.toString() !== req.user.id) {
-      console.log(`Unauthorized: User ${req.user.id} attempted to update course ${courseId} owned by ${course.instructorId}`);
-      return res.status(403).json({ message: 'You can only update your own courses' });
-    }
-
-    // Validate required fields
-    const requiredFields = ['title', 'description', 'duration', 'level', 'category', 'image'];
-    const missingFields = requiredFields.filter(field => !req.body[field]);
-    if (missingFields.length > 0) {
-      return res.status(400).json({ 
-        message: `Missing required fields: ${missingFields.join(', ')}` 
-      });
-    }
-
-    // Validate level enum
-    const validLevels = ['Beginner', 'Intermediate', 'Advanced'];
-    if (!validLevels.includes(req.body.level)) {
-      return res.status(400).json({ 
-        message: `Invalid level. Must be one of: ${validLevels.join(', ')}` 
-      });
-    }
-
-    // Check if new days are being added
-    let newDaysAdded = false;
-    let newDayCount = 0;
-    if (req.body.roadmap && Array.isArray(req.body.roadmap)) {
-      const currentDays = course.roadmap ? course.roadmap.length : 0;
-      const newDays = req.body.roadmap.length;
-      if (newDays > currentDays) {
-        newDaysAdded = true;
-        newDayCount = newDays - currentDays;
-      }
-    }
-
-    // Validate roadmap if provided
-    if (req.body.roadmap) {
-      if (!Array.isArray(req.body.roadmap)) {
-        return res.status(400).json({ message: 'Roadmap must be an array' });
-      }
-      
-      for (let i = 0; i < req.body.roadmap.length; i++) {
-        const day = req.body.roadmap[i];
-        if (!day.topics || !day.video) {
-          return res.status(400).json({ 
-            message: `Day ${i + 1} in roadmap is missing required fields (topics and video)` 
-          });
-        }
-
-        // Validate MCQs if present
-        if (day.mcqs && Array.isArray(day.mcqs)) {
-          for (let j = 0; j < day.mcqs.length; j++) {
-            const mcq = day.mcqs[j];
-            if (!mcq.question || !Array.isArray(mcq.options) || mcq.options.length === 0) {
-              return res.status(400).json({
-                message: `Invalid MCQ format in Day ${i + 1}, MCQ ${j + 1}`
-              });
-            }
-            // Ensure at least one correct option
-            if (!mcq.options.some(opt => opt.isCorrect)) {
-              return res.status(400).json({
-                message: `MCQ ${j + 1} in Day ${i + 1} must have at least one correct option`
-              });
-            }
-          }
-        }
-      }
-    }
-
-    // Update fields
-    const updateableFields = [
-      'title', 'description', 'longDescription', 'image', 'duration', 
-      'level', 'category', 'skills', 'modules', 'roadmap', 'courseAccess'
-    ];
-
-    // Log update attempt
-    console.log('Attempting to update course:', {
-      courseId,
-      instructorId: req.user.id,
-      updateFields: Object.keys(req.body)
-    });
-
-    updateableFields.forEach(field => {
-      if (req.body[field] !== undefined) {
-        course[field] = req.body[field];
-      }
-    });
-
-    // Update timestamp
-    course.updatedAt = new Date();
-
-    await course.save();
-
-    // Create notifications for enrolled students if new days were added
-    if (newDaysAdded) {
-      try {
-        const enrollments = await UserCourse.find({ 
-          courseId,
-          status: { $in: ['enrolled', 'started', 'completed'] }
-        });
-
-        const notificationPromises = enrollments.map(enrollment => {
-          if (enrollment.userId.toString() !== req.user.id) {
-            return new Notification({
-              userId: enrollment.userId,
-              type: 'new_day',
-              title: `New Content Added to ${course.title}`,
-              message: `${newDayCount} new day${newDayCount > 1 ? 's' : ''} added to the course "${course.title}"`,
-              courseId: course._id,
-              link: `/courses/${course._id}`,
-              read: false,
-              timestamp: new Date()
-            }).save();
-          }
-        });
-
-        await Promise.all(notificationPromises);
-        console.log(`Created notifications for ${notificationPromises.length} enrolled students`);
-      } catch (notificationError) {
-        console.error('Error creating notifications:', notificationError);
-      }
-    }
-
-    // Log successful update
-    console.log('Course updated successfully:', {
-      courseId,
-      instructorId: req.user.id,
-      updatedFields: Object.keys(req.body),
-      newDaysAdded,
-      newDayCount
-    });
-
-    res.json({ 
-      message: 'Course updated successfully',
-      course
-    });
-  } catch (error) {
-    console.error('Update course error:', {
-      error: error.message,
-      stack: error.stack,
-      courseId: req.params.courseId,
-      userId: req.user?.id
-    });
-    
-    // Handle specific MongoDB errors
-    if (error.name === 'ValidationError') {
-      return res.status(400).json({ 
-        message: 'Validation error', 
-        errors: Object.values(error.errors).map(err => err.message)
-      });
-    }
-    if (error.name === 'CastError') {
-      return res.status(400).json({ 
-        message: 'Invalid course ID format'
-      });
-    }
-    
-    res.status(500).json({ 
-      message: 'Server error occurred while updating course',
-      error: error.message
-    });
-  }
-});
-
-// Get instructor dashboard overview with real-time data
-app.get('/api/instructor/dashboard/overview', authenticateToken, async (req, res) => {
-  try {
-    // Verify user is an instructor
-    if (req.user.role !== 'instructor') {
-      return res.status(403).json({ message: 'Access denied. Only instructors can access dashboard data.' });
-    }
-
-    // Get all instructor's courses
-    const courses = await Course.find({ instructorId: req.user._id });
-    
-    // Basic statistics
-    const totalCourses = courses.length;
-    
-    // Get active courses (courses with at least one enrolled student)
-    const activeCourses = courses.filter(course => course.students > 0);
-    const activeCourseCount = activeCourses.length;
-    
-    // Total students across all courses
-    const totalStudents = courses.reduce((sum, course) => sum + (course.students || 0), 0);
-    
-    // Calculate average rating and total reviews
-    let totalRating = 0;
-    let reviewCount = 0;
-    courses.forEach(course => {
-      if (course.reviews && course.reviews.length > 0) {
-        totalRating += course.reviews.reduce((sum, review) => sum + review.rating, 0);
-        reviewCount += course.reviews.length;
-      }
-    });
-    const averageRating = reviewCount > 0 ? (totalRating / reviewCount).toFixed(1) : 0;
-
-    // Calculate teaching hours based on course content
-    const teachingHours = courses.reduce((sum, course) => {
-      let courseHours = 0;
-      if (course.modules) {
-        course.modules.forEach(module => {
-          if (module.lessons) {
-            courseHours += module.lessons.reduce((hours, lesson) => 
-              hours + (lesson.duration || 0), 0);
-          }
-        });
-      }
-      return sum + courseHours;
-    }, 0);
-    
-    // Get recent enrollments (last 30 days)
-    const thirtyDaysAgo = new Date();
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-    
-    const recentEnrollments = await UserCourse.find({
-      courseId: { $in: courses.map(course => course._id) },
-      enrolledAt: { $gte: thirtyDaysAgo }
-    }).sort({ enrolledAt: -1 })
-      .limit(10)
-      .populate('userId', 'name email')
-      .populate('courseId', 'title');
-      
-    // Get recent reviews (last 30 days)
-    const recentReviews = [];
-    courses.forEach(course => {
-      if (course.reviews && course.reviews.length > 0) {
-        course.reviews.forEach(review => {
-          if (review.createdAt && review.createdAt >= thirtyDaysAgo) {
-            recentReviews.push({
-              studentName: review.studentName,
-              rating: review.rating,
-              comment: review.comment,
-              date: review.createdAt,
-              courseTitle: course.title
-            });
-          }
-        });
-      }
-    });
-    
-    // Sort reviews by date (newest first) and limit to 5
-    recentReviews.sort((a, b) => b.date - a.date);
-    const mostRecentReviews = recentReviews.slice(0, 5);
-    
-    // Get recent course completions
-    const recentCompletions = await UserCourse.find({
-      courseId: { $in: courses.map(course => course._id) },
-      status: 'completed',
-      updatedAt: { $gte: thirtyDaysAgo }
-    }).sort({ updatedAt: -1 })
-      .limit(10)
-      .populate('userId', 'name email')
-      .populate('courseId', 'title');
-      
-    // Calculate recent revenue (if applicable)
-    // This would require payment data which isn't in the current model
-    
-    // Calculate completion rates
-    const enrollmentData = await UserCourse.find({
-      courseId: { $in: courses.map(course => course._id) }
-    });
-    
-    const completionRates = courses.map(course => {
-      const courseEnrollments = enrollmentData.filter(e => 
-        e.courseId.toString() === course._id.toString()
-      );
-      
-      const totalEnrollments = courseEnrollments.length;
-      const completions = courseEnrollments.filter(e => e.status === 'completed').length;
-      
-      return {
-        courseId: course._id,
-        courseTitle: course.title,
-        totalEnrollments,
-        completions,
-        completionRate: totalEnrollments > 0 ? Math.round((completions / totalEnrollments) * 100) : 0
-      };
-    });
-    
-    // Get recent activity timeline (combined events, sorted by date)
-    const recentActivity = [
-      ...recentEnrollments.map(enrollment => ({
-        type: 'enrollment',
-        date: enrollment.enrolledAt,
-        studentName: enrollment.userId.name,
-        studentId: enrollment.userId._id,
-        courseTitle: enrollment.courseId.title,
-        courseId: enrollment.courseId._id
-      })),
-      ...mostRecentReviews.map(review => ({
-        type: 'review',
-        date: review.date,
-        studentName: review.studentName,
-        rating: review.rating,
-        comment: review.comment,
-        courseTitle: review.courseTitle
-      })),
-      ...recentCompletions.map(completion => ({
-        type: 'completion',
-        date: completion.updatedAt,
-        studentName: completion.userId.name,
-        studentId: completion.userId._id,
-        courseTitle: completion.courseId.title,
-        courseId: completion.courseId._id
-      }))
-    ].sort((a, b) => b.date - a.date).slice(0, 10);
-    
-    res.json({
-      // Basic stats
-      totalCourses,
-      activeCourses: activeCourseCount,
-      totalStudents,
-      averageRating: parseFloat(averageRating),
-      totalReviews: reviewCount,
-      teachingHours,
-      
-      // Student progress data
-      completionRates,
-      
-      // Recent activity
-      recentActivity,
-      
-      // Profile completion
-      profileCompletion: calculateProfileCompletion(req.user),
-      
-      // Course breakdown
-      courseBreakdown: courses.map(course => ({
-        id: course._id,
-        title: course.title,
-        students: course.students,
-        rating: course.rating,
-        created: course.createdAt
-      }))
-    });
-    
-  } catch (error) {
-    console.error('Error fetching instructor dashboard data:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
-  }
-});
-
 // Admin: Delete course
 app.delete('/api/admin/courses/:courseId', authenticateToken, adminMiddleware, async (req, res) => {
   try {
@@ -3125,7 +2471,7 @@ async function getRecentActivities() {
       .populate('userId', 'name')
       .populate('courseId', 'title');
     
-    // Get recent support tickets/contact requests
+    // Get recent contact requests
     const recentContactRequests = await ContactRequest.find()
       .sort({ createdAt: -1 })
       .limit(5);
@@ -3202,84 +2548,7 @@ function formatRelativeTime(dateString) {
   return `${diffInYears} year${diffInYears === 1 ? '' : 's'} ago`;
 }
 
-// Support ticket routes
-// Submit a support ticket (instructor)
-app.post('/api/instructor/support/tickets', authenticateToken, async (req, res) => {
-  try {
-    // Verify user is an instructor
-    if (req.user.role !== 'instructor') {
-      return res.status(403).json({ message: 'Access denied. Only instructors can submit support tickets.' });
-    }
 
-    const { instructorName, instructorEmail, category, subject, description } = req.body;
-
-    // Validate required fields
-    if (!instructorName || !instructorEmail || !category || !subject || !description) {
-      return res.status(400).json({ message: 'Missing required fields' });
-    }
-
-    // Create a new support ticket
-    const supportTicket = new SupportTicket({
-      instructorName,
-      instructorEmail,
-      category,
-      subject,
-      description,
-      status: 'open',
-      priority: 'medium',
-      assignedTo: null
-    });
-
-    await supportTicket.save();
-
-    res.status(201).json({
-      message: 'Support ticket submitted successfully',
-      ticket: supportTicket
-    });
-  } catch (error) {
-    console.error('Error submitting support ticket:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
-  }
-});
-
-// Get all support tickets (admin only)
-app.get('/api/admin/support/tickets', authenticateToken, adminMiddleware, async (req, res) => {
-  try {
-    const tickets = await SupportTicket.find().sort({ createdAt: -1 });
-    res.json(tickets);
-  } catch (error) {
-    console.error('Error getting support tickets:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
-  }
-});
-
-// Update support ticket (admin only)
-app.put('/api/admin/support/tickets/:id', authenticateToken, adminMiddleware, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { status, priority, assignedTo } = req.body;
-
-    const ticket = await SupportTicket.findById(id);
-    if (!ticket) {
-      return res.status(404).json({ message: 'Support ticket not found' });
-    }
-
-    // Update ticket fields
-    if (status) ticket.status = status;
-    if (priority) ticket.priority = priority;
-    if (assignedTo !== undefined) ticket.assignedTo = assignedTo;
-
-    await ticket.save();
-
-    res.json({
-      message: 'Support ticket updated successfully',
-      ticket
-    });
-  } catch (error) {
-    console.error('Error updating support ticket:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
-  }
-});
 
 // Notification Routes
 
@@ -3340,144 +2609,20 @@ app.put('/api/notifications/:id/read', authenticateToken, async (req, res) => {
   }
 });
 
-// Create notification (internal function to be called when events occur)
-const createNotification = async (userId, type, courseName, title) => {
+// Helper function to get image URL
+app.get('/api/files/:bucket/:filename', authenticateToken, async (req, res) => {
   try {
-    const notification = new Notification({
-      userId,
-      type,
-      courseName,
-      title,
-      read: false
-    });
-    await notification.save();
-    return notification;
+    const { bucket, filename } = req.params;
+    const url = await getFileUrl(bucket, filename);
+    res.json({ url });
   } catch (error) {
-    console.error('Error creating notification:', error);
-    throw error;
-  }
-};
-
-// Example: Create notification when new video is uploaded
-app.post('/api/courses/:courseId/videos', authenticateToken, async (req, res) => {
-  try {
-    // ... existing video upload logic ...
-
-    // Create notifications for all enrolled students
-    const enrolledStudents = await Enrollment.find({ courseId: req.params.courseId });
-    const course = await Course.findById(req.params.courseId);
-    
-    for (const enrollment of enrolledStudents) {
-      await createNotification(
-        enrollment.userId,
-        'video',
-        course.title,
-        req.body.title
-      );
-    }
-
-    res.json({ message: 'Video uploaded successfully' });
-  } catch (error) {
-    console.error('Error uploading video:', error);
-    res.status(500).json({ message: 'Failed to upload video' });
+    console.error('Error getting file URL:', error);
+    res.status(500).json({ message: 'Error generating file URL' });
   }
 });
 
 // Start server
 const PORT = process.env.PORT || 5001;
-
-// Add Minio client initialization and list buckets
-const minioClient = new Minio.Client({
-  endPoint: 'lmsbackendminio-api.llp.trizenventures.com',
-  port: 443,
-  useSSL: true,
-  accessKey: 'b72084650d4c21dd04b801f0',
-  secretKey: 'be2339a15ee0544de0796942ba3a85224cc635'
-});
-
-// Initialize AWS S3 Client (configured for Minio)
-const s3Client = new S3Client({
-  endpoint: 'https://lmsbackendminio-api.llp.trizenventures.com',
-  region: 'us-east-1',
-  credentials: {
-    accessKeyId: 'b72084650d4c21dd04b801f0',
-    secretAccessKey: 'be2339a15ee0544de0796942ba3a85224cc635'
-  },
-  forcePathStyle: true
-});
-
-mdf.listBuckets(minioClient);
-
-// Video upload endpoint with memory storage for processing files from frontend
-const videoUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 1000 * 1024 * 1024 } });
-
-// Video upload endpoint - updated to use AWS SDK with Upload class
-app.post('/api/upload/video', authenticateToken, videoUpload.single('video'), async (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ message: 'No video file provided' });
-  }
-
-  try {
-    const fileBuffer = req.file.buffer;
-    const originalFilename = req.file.originalname;
-    const objectName = `${Date.now()}-${originalFilename}`;
-    const fileSizeMB = (req.file.size / (1024 * 1024)).toFixed(2);
-
-    console.log(`Processing file: ${originalFilename}`);
-    console.log(`File size: ${fileSizeMB}MB`);
-
-    // Track upload progress
-    let lastPercentLogged = 0;
-    
-    // Set up the upload with the AWS SDK Upload class
-    const upload = new Upload({
-      client: s3Client,
-      params: {
-        Bucket: 'webdevbootcamp1',
-        Key: objectName,
-        Body: fileBuffer,
-        ContentType: req.file.mimetype,
-        ContentLength: req.file.size // Explicitly set content length
-      }
-    });
-
-    // Add progress event listener
-    upload.on('httpUploadProgress', (progress) => {
-      const percent = Math.floor((progress.loaded / req.file.size) * 100);
-      
-      // Log every 10% change to avoid console spam
-      if (percent >= lastPercentLogged + 10 || percent === 100) {
-        lastPercentLogged = percent;
-        console.log(`Upload progress: ${percent}%`);
-      }
-    });
-
-    // Execute the upload
-    const result = await upload.done();
-    
-    // Generate a presigned URL valid for 24 hours using the Minio client
-    const url = await new Promise((resolve, reject) => {
-      minioClient.presignedUrl('GET', 'webdevbootcamp1', objectName, 24 * 60 * 60, (err, url) => {
-        if (err) reject(err);
-        else resolve(url);
-      });
-    });
-
-    // Return response with URL and upload details
-    res.json({ 
-      url,
-      uploadDetails: {
-        fileName: originalFilename,
-        totalSize: fileSizeMB,
-        status: 'completed'
-      },
-      message: `File uploaded successfully (${fileSizeMB}MB)`
-    });
-  } catch (error) {
-    console.error('Upload error:', error);
-    res.status(500).json({ message: 'Error uploading to storage' });
-  }
-});
 
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 
@@ -4228,20 +3373,5 @@ app.put('/api/notifications/mark-all-read', authenticateToken, async (req, res) 
   } catch (error) {
     console.error('Error marking all notifications as read:', error);
     res.status(500).json({ message: 'Failed to mark all notifications as read' });
-  }
-});
-// 👇 Place this near the bottom of server.js
-app.post('/api/upload/video', upload.single('video'), (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ message: 'No video file uploaded' });
-    }
-
-    // You can customize where/how the file is saved/processed
-    const videoPath = `/uploads/${req.file.filename}`;
-    res.status(200).json({ message: 'Video uploaded successfully', videoPath });
-  } catch (err) {
-    console.error('Video upload error:', err);
-    res.status(500).json({ message: 'Server error during video upload' });
   }
 });
