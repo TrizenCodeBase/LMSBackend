@@ -1,9 +1,12 @@
+# INSIDE /backend
 FROM node:20-alpine
 
 WORKDIR /app
-COPY backend/package*.json ./
+
+COPY package*.json ./
 RUN npm install
 COPY backend/ ./
 
+# Expose port your Node app uses (usually 5001)
 EXPOSE 5001
-CMD ["node", "/server.js"]  # Adjust path if your entry point is different
+CMD ["node", "server.js"]
