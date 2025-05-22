@@ -35,7 +35,7 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Enable CORS for image requests
 app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', 'https://lms.trizenventures.com');
+  res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
   next();
@@ -199,6 +199,14 @@ const sendEnrollmentApprovalEmail = async (enrollmentRequest) => {
           <p>Dear ${enrollmentRequest.userId.name || 'Student'},</p>
 
           <p>We are pleased to inform you that your enrollment in the course <strong>"${enrollmentRequest.courseId.title}"</strong> has been officially approved.</p>
+
+          <div style="background-color: #f8f9fa; border-radius: 8px; padding: 15px; margin: 20px 0;">
+            <p style="margin: 0; font-size: 16px;">Access your course here:</p>
+            <a href="https://lms.trizenventures.com/course/${enrollmentRequest.courseId._id}/weeks" 
+               style="display: inline-block; background-color: #007BFF; color: white; text-decoration: none; padding: 10px 20px; border-radius: 5px; margin-top: 10px;">
+              Start Learning
+            </a>
+          </div>
 
           <p>You now have full access to all course materials, resources, and support. We encourage you to dive in and begin your learning journey with us.</p>
 
