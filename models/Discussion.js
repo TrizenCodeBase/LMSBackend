@@ -1,4 +1,4 @@
-const mongoose = require('mongoose');
+import mongoose from 'mongoose';
 
 const replySchema = new mongoose.Schema({
   userId: {
@@ -55,4 +55,4 @@ const discussionSchema = new mongoose.Schema({
 
 const Discussion = mongoose.model('Discussion', discussionSchema);
 
-module.exports = Discussion;
+export default Discussion;

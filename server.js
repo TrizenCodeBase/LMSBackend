@@ -1,14 +1,20 @@
-const express = require('express');
-const mongoose = require('mongoose');
-const cors = require('cors');
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const dotenv = require('dotenv');
-const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
-const nodemailer = require('nodemailer');
-const { uploadPaymentScreenshot, getFileUrl } = require('./minioClient');
+import express from 'express';
+import mongoose from 'mongoose';
+import cors from 'cors';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+import dotenv from 'dotenv';
+import multer from 'multer';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
+import fs from 'fs';
+import nodemailer from 'nodemailer';
+import { uploadPaymentScreenshot, getFileUrl } from './minioClient.js';
+
+// Get __dirname equivalent in ES modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 // Load environment variables
 dotenv.config();
@@ -47,13 +53,12 @@ mongoose.connect(process.env.MongoDB_URL)
   .catch(err => console.error('MongoDB connection error:', err));
 
 // Import models
-const User = require('./models/User');
-const Course = require('./models/Course');
-const UserCourse = require('./models/UserCourse');
-const Discussion = require('./models/Discussion');
-
-const Notification = require('./models/Notification');
-const QuizSubmission = require('./models/QuizSubmission');
+import User from './models/User.js';
+import Course from './models/Course.js';
+import UserCourse from './models/UserCourse.js';
+import Discussion from './models/Discussion.js';
+import Notification from './models/Notification.js';
+import QuizSubmission from './models/QuizSubmission.js';
 
 // Create Message model schema
 const messageSchema = new mongoose.Schema({
@@ -3381,5 +3386,286 @@ app.put('/api/notifications/mark-all-read', authenticateToken, async (req, res) 
   } catch (error) {
     console.error('Error marking all notifications as read:', error);
     res.status(500).json({ message: 'Failed to mark all notifications as read' });
+  }
+});
+// Admin: Delete enrollment requests
+app.delete('/api/admin/enrollment-requests', authenticateToken, adminMiddleware, async (req, res) => {
+  try {
+    const { requestIds } = req.query;
+    
+    if (!requestIds) {
+      return res.status(400).json({ message: 'Request IDs are required' });
+    }
+
+    // Parse the stringified array
+    let requestIdsArray;
+    try {
+      const decodedIds = decodeURIComponent(requestIds);
+      requestIdsArray = JSON.parse(decodedIds);
+      if (!Array.isArray(requestIdsArray)) {
+        throw new Error('Not an array');
+      }
+    } catch (error) {
+      console.error('Error parsing request IDs:', error);
+      return res.status(400).json({ message: 'Invalid request IDs format' });
+    }
+
+    // Find the requests before deleting them
+    const requestsToDelete = await EnrollmentRequest.find({
+      _id: { $in: requestIdsArray }
+    });
+
+    // Store the requests in a separate collection for potential restoration
+    await DeletedEnrollmentRequest.insertMany(
+      requestsToDelete.map(req => ({
+        ...req.toObject(),
+        originalId: req._id,
+        deletedAt: new Date()
+      }))
+    );
+
+    // Delete the enrollment requests
+    const deleteResult = await EnrollmentRequest.deleteMany({
+      _id: { $in: requestIdsArray }
+    });
+
+    // Also delete any pending enrollments in UserCourse for these requests
+    const enrollmentRequests = requestsToDelete.filter(req => req.status === 'pending');
+    
+    for (const request of enrollmentRequests) {
+      await UserCourse.deleteOne({ 
+        userId: request.userId,
+        courseId: request.courseId,
+        status: 'pending'
+      });
+    }
+
+    res.json({ 
+      message: 'Enrollment requests deleted successfully',
+      deletedCount: deleteResult.deletedCount,
+      deletedRequests: requestsToDelete
+    });
+  } catch (error) {
+    console.error('Delete enrollment requests error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Create DeletedEnrollmentRequest model
+const deletedEnrollmentRequestSchema = new mongoose.Schema({
+  originalId: mongoose.Schema.Types.ObjectId,
+  userId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+  },
+  courseId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Course',
+  },
+  email: {
+    type: String,
+    required: true,
+  },
+  mobile: {
+    type: String,
+    required: true,
+  },
+  courseName: {
+    type: String,
+    required: true,
+  },
+  utrNumber: {
+    type: String,
+    required: true,
+  },
+  transactionScreenshot: {
+    type: String,
+    required: true,
+  },
+  status: {
+    type: String,
+    enum: ['pending', 'approved', 'rejected'],
+    required: true,
+  },
+  deletedAt: {
+    type: Date,
+    required: true,
+  }
+}, { timestamps: true });
+
+const DeletedEnrollmentRequest = mongoose.model('DeletedEnrollmentRequest', deletedEnrollmentRequestSchema);
+
+// Admin: Restore deleted enrollment requests
+app.post('/api/admin/enrollment-requests/restore', authenticateToken, adminMiddleware, async (req, res) => {
+  try {
+    const { requestIds } = req.body;
+    
+    if (!requestIds || !Array.isArray(requestIds)) {
+      return res.status(400).json({ message: 'Request IDs array is required' });
+    }
+
+    // Find the deleted requests
+    const deletedRequests = await DeletedEnrollmentRequest.find({
+      originalId: { $in: requestIds }
+    });
+
+    if (deletedRequests.length === 0) {
+      return res.status(404).json({ message: 'No deleted requests found' });
+    }
+
+    // Restore the requests to the original collection
+    const restoredRequests = await EnrollmentRequest.insertMany(
+      deletedRequests.map(({ originalId, userId, courseId, email, mobile, courseName, utrNumber, transactionScreenshot, status }) => ({
+        _id: originalId,
+        userId,
+        courseId,
+        email,
+        mobile,
+        courseName,
+        utrNumber,
+        transactionScreenshot,
+        status
+      }))
+    );
+
+    // Restore any pending enrollments in UserCourse
+    const pendingRequests = deletedRequests.filter(req => req.status === 'pending');
+    
+    for (const request of pendingRequests) {
+      await UserCourse.create({ 
+        userId: request.userId,
+        courseId: request.courseId,
+        status: 'pending',
+        progress: 0
+      });
+    }
+
+    // Remove the requests from the deleted collection
+    await DeletedEnrollmentRequest.deleteMany({
+      originalId: { $in: requestIds }
+    });
+
+    res.json({ 
+      message: 'Enrollment requests restored successfully',
+      restoredCount: restoredRequests.length,
+      restoredRequests
+    });
+  } catch (error) {
+    console.error('Restore enrollment requests error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Admin: Get deleted enrollment requests
+app.get('/api/admin/enrollment-requests/deleted', authenticateToken, adminMiddleware, async (req, res) => {
+  try {
+    // First get deleted requests
+    const deletedRequests = await DeletedEnrollmentRequest.find()
+      .sort({ deletedAt: -1 })
+      .limit(100);
+
+    // Get unique emails from the requests
+    const emails = [...new Set(deletedRequests.map(req => req.email))];
+
+    // Find users by these emails
+    const users = await User.find({ email: { $in: emails } }, 'email name');
+
+    // Create a map of email to user details
+    const userMap = users.reduce((map, user) => {
+      map[user.email] = user;
+      return map;
+    }, {});
+
+    // Attach user details to each request
+    const enrichedRequests = deletedRequests.map(request => {
+      const user = userMap[request.email] || null;
+      return {
+        ...request.toObject(),
+        userId: user ? { _id: user._id, name: user.name, email: user.email } : null
+      };
+    });
+    
+    res.json(enrichedRequests);
+  } catch (error) {
+    console.error('Get deleted enrollment requests error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Admin: Get deleted enrollment requests
+app.get('/api/admin/enrollment-requests/deleted', authenticateToken, adminMiddleware, async (req, res) => {
+  try {
+    // First get deleted requests
+    const deletedRequests = await DeletedEnrollmentRequest.find()
+      .sort({ deletedAt: -1 })
+      .limit(100);
+
+    // Get unique emails from the requests
+    const emails = [...new Set(deletedRequests.map(req => req.email))];
+
+    // Find users by these emails
+    const users = await User.find({ email: { $in: emails } }, 'email name userId');
+
+    // Create a map of email to user details
+    const userMap = users.reduce((map, user) => {
+      map[user.email] = user;
+      return map;
+    }, {});
+
+    // Attach user details to each request
+    const enrichedRequests = deletedRequests.map(request => {
+      const user = userMap[request.email] || null;
+      return {
+        ...request.toObject(),
+        userId: user ? { 
+          _id: user._id, 
+          name: user.name, 
+          email: user.email,
+          userId: user.userId 
+        } : null
+      };
+    });
+    
+    res.json(enrichedRequests);
+  } catch (error) {
+    console.error('Get deleted enrollment requests error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Admin: Permanently delete enrollment requests
+app.delete('/api/admin/enrollment-requests/permanent', authenticateToken, adminMiddleware, async (req, res) => {
+  try {
+    const { requestIds } = req.query;
+    
+    if (!requestIds) {
+      return res.status(400).json({ message: 'Request IDs are required' });
+    }
+
+    // Parse the stringified array
+    let requestIdsArray;
+    try {
+      const decodedIds = decodeURIComponent(requestIds);
+      requestIdsArray = JSON.parse(decodedIds);
+      if (!Array.isArray(requestIdsArray)) {
+        throw new Error('Not an array');
+      }
+    } catch (error) {
+      console.error('Error parsing request IDs:', error);
+      return res.status(400).json({ message: 'Invalid request IDs format' });
+    }
+
+    // Permanently delete the requests
+    const deleteResult = await DeletedEnrollmentRequest.deleteMany({
+      originalId: { $in: requestIdsArray }
+    });
+
+    res.json({ 
+      message: 'Enrollment requests permanently deleted',
+      deletedCount: deleteResult.deletedCount
+    });
+  } catch (error) {
+    console.error('Permanent delete error:', error);
+    res.status(500).json({ message: 'Server error' });
   }
 });

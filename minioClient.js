@@ -1,5 +1,7 @@
-const Minio = require('minio');
-require('dotenv').config();
+import * as Minio from 'minio';
+import dotenv from 'dotenv';
+
+dotenv.config();
 
 // Log environment variables for debugging (remove in production)
 console.log('MinIO Configuration:');
@@ -62,7 +64,7 @@ const getFileUrl = async (bucketName, objectName) => {
   }
 };
 
-module.exports = {
+export {
   minioClient,
   uploadPaymentScreenshot,
   getFileUrl,

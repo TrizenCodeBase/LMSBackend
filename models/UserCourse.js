@@ -1,4 +1,4 @@
-const mongoose = require('mongoose');
+import mongoose from 'mongoose';
 
 const userCourseSchema = new mongoose.Schema({
   userId: { 
@@ -51,4 +51,4 @@ userCourseSchema.pre('save', function(next) {
 
 const UserCourse = mongoose.model('UserCourse', userCourseSchema);
 
-module.exports = UserCourse;
+export default UserCourse;

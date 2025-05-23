@@ -1,4 +1,4 @@
-const mongoose = require('mongoose');
+import mongoose from 'mongoose';
 
 const quizSubmissionSchema = new mongoose.Schema({
   studentId: {
@@ -86,4 +86,4 @@ quizSubmissionSchema.methods.isQuizCompleted = function() {
 
 const QuizSubmission = mongoose.model('QuizSubmission', quizSubmissionSchema);
 
-module.exports = QuizSubmission; 
+export default QuizSubmission; 
