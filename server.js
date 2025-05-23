@@ -269,7 +269,8 @@ app.post('/api/auth/signup', async (req, res) => {
       email,
       password: hashedPassword,
       role: role === 'admin' ? 'admin' : 'student', // Only allow student or admin roles
-      displayName: name
+      displayName: name,
+      status: 'active'
     };
 
     const user = new User(userData);
@@ -283,6 +284,7 @@ app.post('/api/auth/signup', async (req, res) => {
       token,
       user: {
         id: user._id,
+        userId: user.userId,
         name: user.name,
         email: user.email,
         role: user.role
