@@ -11,6 +11,7 @@ import { dirname } from 'path';
 import fs from 'fs';
 import nodemailer from 'nodemailer';
 import { uploadPaymentScreenshot, getFileUrl } from './minioClient.js';
+import { generateRandomString } from './models/generateUserId.js';
 
 // Get __dirname equivalent in ES modules
 const __filename = fileURLToPath(import.meta.url);
@@ -271,12 +272,22 @@ app.post('/api/auth/signup', async (req, res) => {
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
 
+    // Generate userId based on role
+    const userRole = role === 'admin' ? 'admin' : 'student';
+    let userId;
+    if (userRole === 'student') {
+      userId = `TST${generateRandomString(4)}`;
+    } else if (userRole === 'admin') {
+      userId = `TAD${generateRandomString(4)}`;
+    }
+
     // Create user object
     const userData = {
+      userId,
       name,
       email,
       password: hashedPassword,
-      role: role === 'admin' ? 'admin' : 'student', // Only allow student or admin roles
+      role: userRole,
       displayName: name,
       status: 'active'
     };
