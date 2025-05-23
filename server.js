@@ -939,7 +939,9 @@ app.post('/api/enrollment-requests', authenticateToken, upload.single('transacti
 // Admin: Get all enrollment requests
 app.get('/api/admin/enrollment-requests', authenticateToken, adminMiddleware, async (req, res) => {
   try {
-    const enrollmentRequests = await EnrollmentRequest.find().sort({ createdAt: -1 });
+    const enrollmentRequests = await EnrollmentRequest.find()
+      .populate('userId', 'name email userId') // Populate user details
+      .sort({ createdAt: -1 });
     res.json(enrollmentRequests);
   } catch (error) {
     console.error('Get enrollment requests error:', error);
