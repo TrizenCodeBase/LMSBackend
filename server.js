@@ -1360,7 +1360,7 @@ app.get('/api/admin/instructors', authenticateToken, adminMiddleware, async (req
 // Admin: Get all users
 app.get('/api/admin/users', authenticateToken, adminMiddleware, async (req, res) => {
   try {
-    const users = await User.find().select('-password');
+    const users = await User.find({ role: { $ne: 'admin' } }).select('-password');
     res.json(users);
   } catch (error) {
     console.error('Get users error:', error);
