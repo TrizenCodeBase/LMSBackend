@@ -122,14 +122,23 @@ const enrollmentRequestSchema = new mongoose.Schema({
   mobile: {
     type: String,
     required: true,
+    validate: {
+      validator: function(v) {
+        return /^[0-9]{10}$/.test(v);
+      },
+      message: props => `${props.value} is not a valid 10-digit mobile number!`
+    }
   },
   courseName: {
     type: String,
     required: true,
   },
-  utrNumber: {
+  transactionId: {
     type: String,
     required: true,
+    minlength: 10,
+    maxlength: 30,
+    match: /^[a-zA-Z0-9]+$/,
   },
   transactionScreenshot: {
     type: String,
@@ -881,10 +890,25 @@ const adminMiddleware = async (req, res, next) => {
 // Submit enrollment request
 app.post('/api/enrollment-requests', authenticateToken, upload.single('transactionScreenshot'), async (req, res) => {
   try {
-    const { email, mobile, utrNumber, courseName, courseId } = req.body;
+    const { email, mobile, transactionId, courseName, courseId } = req.body;
     
-    if (!email || !mobile || !utrNumber || !courseName || !courseId || !req.file) {
+    if (!email || !mobile || !transactionId || !courseName || !courseId || !req.file) {
       return res.status(400).json({ message: 'All fields and file are required' });
+    }
+
+    // Validate transactionId format
+    if (!transactionId.match(/^[a-zA-Z0-9]{10,30}$/)) {
+      return res.status(400).json({ 
+        message: 'Transaction ID must be 10-30 characters long and contain only letters and numbers' 
+      });
+    }
+
+    // Check for duplicate transactionId
+    const existingRequest = await EnrollmentRequest.findOne({ transactionId });
+    if (existingRequest) {
+      return res.status(400).json({ 
+        message: 'This Transaction ID has already been used in another enrollment request' 
+      });
     }
 
     // Upload file to Minio
@@ -896,7 +920,7 @@ app.post('/api/enrollment-requests', authenticateToken, upload.single('transacti
       email,
       mobile,
       courseName,
-      utrNumber,
+      transactionId,
       transactionScreenshot: screenshotPath,
       status: 'pending',
     });
@@ -3536,14 +3560,23 @@ const deletedEnrollmentRequestSchema = new mongoose.Schema({
   mobile: {
     type: String,
     required: true,
+    validate: {
+      validator: function(v) {
+        return /^[0-9]{10}$/.test(v);
+      },
+      message: props => `${props.value} is not a valid 10-digit mobile number!`
+    }
   },
   courseName: {
     type: String,
     required: true,
   },
-  utrNumber: {
+  transactionId: {
     type: String,
     required: true,
+    minlength: 10,
+    maxlength: 30,
+    match: /^[a-zA-Z0-9]+$/,
   },
   transactionScreenshot: {
     type: String,
@@ -3582,14 +3615,14 @@ app.post('/api/admin/enrollment-requests/restore', authenticateToken, adminMiddl
 
     // Restore the requests to the original collection
     const restoredRequests = await EnrollmentRequest.insertMany(
-      deletedRequests.map(({ originalId, userId, courseId, email, mobile, courseName, utrNumber, transactionScreenshot, status }) => ({
+      deletedRequests.map(({ originalId, userId, courseId, email, mobile, courseName, transactionId, transactionScreenshot, status }) => ({
         _id: originalId,
         userId,
         courseId,
         email,
         mobile,
         courseName,
-        utrNumber,
+        transactionId,
         transactionScreenshot,
         status
       }))
