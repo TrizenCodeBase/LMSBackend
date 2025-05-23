@@ -3613,9 +3613,21 @@ app.post('/api/admin/enrollment-requests/restore', authenticateToken, adminMiddl
       return res.status(404).json({ message: 'No deleted requests found' });
     }
 
-    // Restore the requests to the original collection
+    // Restore the requests to the original collection with original timestamps
     const restoredRequests = await EnrollmentRequest.insertMany(
-      deletedRequests.map(({ originalId, userId, courseId, email, mobile, courseName, transactionId, transactionScreenshot, status }) => ({
+      deletedRequests.map(({ 
+        originalId, 
+        userId, 
+        courseId, 
+        email, 
+        mobile, 
+        courseName, 
+        transactionId, 
+        transactionScreenshot, 
+        status,
+        createdAt,
+        updatedAt
+      }) => ({
         _id: originalId,
         userId,
         courseId,
@@ -3624,8 +3636,11 @@ app.post('/api/admin/enrollment-requests/restore', authenticateToken, adminMiddl
         courseName,
         transactionId,
         transactionScreenshot,
-        status
-      }))
+        status,
+        createdAt,
+        updatedAt
+      })),
+      { timestamps: false } // Disable automatic timestamps
     );
 
     // Restore any pending enrollments in UserCourse
@@ -3636,8 +3651,10 @@ app.post('/api/admin/enrollment-requests/restore', authenticateToken, adminMiddl
         userId: request.userId,
         courseId: request.courseId,
         status: 'pending',
-        progress: 0
-      });
+        progress: 0,
+        createdAt: request.createdAt,
+        updatedAt: request.updatedAt
+      }, { timestamps: false }); // Disable automatic timestamps
     }
 
     // Remove the requests from the deleted collection
