@@ -246,20 +246,28 @@ const sendEnrollmentApprovalEmail = async (enrollmentRequest) => {
 // Signup
 app.post('/api/auth/signup', async (req, res) => {
   try {
+    console.log('Signup request received:', {
+      ...req.body,
+      password: '[REDACTED]' // Don't log the actual password
+    });
+
     const { name, email, password, role } = req.body;
 
     // Validate required fields
     if (!name || !email || !password) {
+      console.log('Missing required fields:', { name: !!name, email: !!email, password: !!password });
       return res.status(400).json({ message: 'Required fields missing' });
     }
 
     // Check if email exists
     const existingUser = await User.findOne({ email });
     if (existingUser) {
+      console.log('Email already registered:', email);
       return res.status(400).json({ message: 'Email already registered' });
     }
 
     // Hash password
+    console.log('Hashing password...');
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
 
@@ -273,11 +281,27 @@ app.post('/api/auth/signup', async (req, res) => {
       status: 'active'
     };
 
+    console.log('Creating new user with data:', {
+      ...userData,
+      password: '[REDACTED]'
+    });
+
     const user = new User(userData);
+    
+    // Log the user object before saving
+    console.log('User object before save:', {
+      ...user.toObject(),
+      password: '[REDACTED]'
+    });
+
     await user.save();
+
+    console.log('User saved successfully:', user._id);
 
     // Generate JWT token
     const token = jwt.sign({ id: user._id, role: user.role }, JWT_SECRET, { expiresIn: '1d' });
+
+    console.log('JWT token generated successfully');
 
     res.status(201).json({
       message: 'Account created successfully',
@@ -292,8 +316,36 @@ app.post('/api/auth/signup', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Signup error:', error);
-    res.status(500).json({ message: 'Server error' });
+    console.error('Signup error details:', {
+      error: error.message,
+      stack: error.stack,
+      name: error.name,
+      code: error.code
+    });
+
+    // Check for specific MongoDB errors
+    if (error.name === 'MongoServerError') {
+      if (error.code === 11000) {
+        // Duplicate key error
+        return res.status(400).json({ 
+          message: 'Email or userId already exists',
+          field: Object.keys(error.keyPattern)[0]
+        });
+      }
+    }
+
+    // Check for validation errors
+    if (error.name === 'ValidationError') {
+      return res.status(400).json({ 
+        message: 'Validation error',
+        errors: Object.values(error.errors).map(err => err.message)
+      });
+    }
+
+    res.status(500).json({ 
+      message: 'Server error',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
   }
 });
 
