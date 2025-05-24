@@ -656,6 +656,53 @@ app.get('/api/courses', async (req, res) => {
 // Get course by ID
 app.get('/api/courses/:id', async (req, res) => {
   try {
+    // Check if the ID is a valid ObjectId
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      // If not a valid ObjectId, try to find by courseUrl
+      const courseByUrl = await Course.findOne({ courseUrl: req.params.id }).select('-__v');
+      if (!courseByUrl) {
+        return res.status(404).json({ message: 'Course not found' });
+      }
+      
+      // If user is authenticated, check enrollment status
+      const token = req.headers.authorization?.split(' ')[1];
+      let enrollmentStatus = null;
+      
+      if (token) {
+        try {
+          const decoded = jwt.verify(token, JWT_SECRET);
+          const userId = decoded.id;
+          
+          // Check if user is enrolled in this course
+          const enrollment = await UserCourse.findOne({
+            userId,
+            courseId: courseByUrl._id
+          });
+          
+          if (enrollment) {
+            enrollmentStatus = {
+              status: enrollment.status,
+              progress: enrollment.progress,
+              completedDays: enrollment.completedDays
+            };
+          }
+        } catch (err) {
+          // Invalid token, but we'll still return the course
+        }
+      }
+      
+      // Add enrollment status to course
+      const courseObj = courseByUrl.toObject();
+      if (enrollmentStatus) {
+        courseObj.enrollmentStatus = enrollmentStatus.status;
+        courseObj.progress = enrollmentStatus.progress;
+        courseObj.completedDays = enrollmentStatus.completedDays;
+      }
+      
+      return res.json(courseObj);
+    }
+    
+    // If it is a valid ObjectId, try to find by ID
     const course = await Course.findById(req.params.id).select('-__v');
     if (!course) {
       return res.status(404).json({ message: 'Course not found' });
@@ -673,13 +720,14 @@ app.get('/api/courses/:id', async (req, res) => {
         // Check if user is enrolled in this course
         const enrollment = await UserCourse.findOne({
           userId,
-          courseId: req.params.id
+          courseId: course._id
         });
         
         if (enrollment) {
           enrollmentStatus = {
             status: enrollment.status,
-            progress: enrollment.progress
+            progress: enrollment.progress,
+            completedDays: enrollment.completedDays
           };
         }
       } catch (err) {
@@ -692,6 +740,57 @@ app.get('/api/courses/:id', async (req, res) => {
     if (enrollmentStatus) {
       courseObj.enrollmentStatus = enrollmentStatus.status;
       courseObj.progress = enrollmentStatus.progress;
+      courseObj.completedDays = enrollmentStatus.completedDays;
+    }
+    
+    res.json(courseObj);
+  } catch (error) {
+    console.error('Get course error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Get course by courseUrl
+app.get('/api/courses/url/:courseUrl', async (req, res) => {
+  try {
+    const course = await Course.findOne({ courseUrl: req.params.courseUrl }).select('-__v');
+    if (!course) {
+      return res.status(404).json({ message: 'Course not found' });
+    }
+    
+    // If user is authenticated, check enrollment status
+    const token = req.headers.authorization?.split(' ')[1];
+    let enrollmentStatus = null;
+    
+    if (token) {
+      try {
+        const decoded = jwt.verify(token, JWT_SECRET);
+        const userId = decoded.id;
+        
+        // Check if user is enrolled in this course
+        const enrollment = await UserCourse.findOne({
+          userId,
+          courseId: course._id
+        });
+        
+        if (enrollment) {
+          enrollmentStatus = {
+            status: enrollment.status,
+            progress: enrollment.progress,
+            completedDays: enrollment.completedDays
+          };
+        }
+      } catch (err) {
+        // Invalid token, but we'll still return the course
+      }
+    }
+    
+    // Add enrollment status to course
+    const courseObj = course.toObject();
+    if (enrollmentStatus) {
+      courseObj.enrollmentStatus = enrollmentStatus.status;
+      courseObj.progress = enrollmentStatus.progress;
+      courseObj.completedDays = enrollmentStatus.completedDays;
     }
     
     res.json(courseObj);
@@ -903,7 +1002,7 @@ app.post('/api/enrollment-requests', authenticateToken, upload.single('transacti
       });
     }
 
-    // Check for duplicate transactionId
+    // Check for existing request with same transaction ID
     const existingRequest = await EnrollmentRequest.findOne({ transactionId });
     if (existingRequest) {
       return res.status(400).json({ 
@@ -911,18 +1010,25 @@ app.post('/api/enrollment-requests', authenticateToken, upload.single('transacti
       });
     }
 
+    // Get course details including courseUrl
+    const course = await Course.findById(courseId);
+    if (!course) {
+      return res.status(404).json({ message: 'Course not found' });
+    }
+
     // Upload file to Minio
     const screenshotPath = await uploadPaymentScreenshot(req.file, req.file.originalname);
     
     const enrollmentRequest = new EnrollmentRequest({
       userId: req.user.id,
-      courseId,
+      courseId: courseId,
+      courseUrl: course.courseUrl,
       email,
       mobile,
       courseName,
       transactionId,
       transactionScreenshot: screenshotPath,
-      status: 'pending',
+      status: 'pending'
     });
     
     await enrollmentRequest.save();
@@ -937,6 +1043,7 @@ app.post('/api/enrollment-requests', authenticateToken, upload.single('transacti
       const enrollment = new UserCourse({
         userId: req.user.id,
         courseId,
+        courseUrl: course.courseUrl,
         status: 'pending',
         progress: 0
       });
@@ -946,6 +1053,7 @@ app.post('/api/enrollment-requests', authenticateToken, upload.single('transacti
               existingEnrollment.status !== 'started' && 
               existingEnrollment.status !== 'completed') {
       existingEnrollment.status = 'pending';
+      existingEnrollment.courseUrl = course.courseUrl;
       await existingEnrollment.save();
     }
     
@@ -977,16 +1085,21 @@ app.get('/api/admin/enrollment-requests', authenticateToken, adminMiddleware, as
 app.put('/api/admin/enrollment-requests/:id/approve', authenticateToken, adminMiddleware, async (req, res) => {
   try {
     const enrollmentRequest = await EnrollmentRequest.findById(req.params.id)
-      .populate('userId', 'email')
-      .populate('courseId', 'title');
+      .populate('userId', 'email name')
+      .populate('courseId', 'title courseUrl');
     
     if (!enrollmentRequest) {
       return res.status(404).json({ message: 'Enrollment request not found' });
     }
     
-    // Update request status
+    // Update request status and approvedAt timestamp
     enrollmentRequest.status = 'approved';
+    enrollmentRequest.approvedAt = new Date();
     await enrollmentRequest.save();
+    
+    // Get the course URL
+    const course = await Course.findById(enrollmentRequest.courseId._id);
+    const courseUrl = course?.courseUrl;
     
     // Update user course enrollment
     const existingEnrollment = await UserCourse.findOne({ 
@@ -996,11 +1109,13 @@ app.put('/api/admin/enrollment-requests/:id/approve', authenticateToken, adminMi
     
     if (existingEnrollment) {
       existingEnrollment.status = 'enrolled';
+      existingEnrollment.courseUrl = courseUrl;
       await existingEnrollment.save();
     } else {
       const enrollment = new UserCourse({
         userId: enrollmentRequest.userId._id,
         courseId: enrollmentRequest.courseId._id,
+        courseUrl: courseUrl,
         status: 'enrolled',
         progress: 0
       });
@@ -1008,23 +1123,21 @@ app.put('/api/admin/enrollment-requests/:id/approve', authenticateToken, adminMi
       await enrollment.save();
     }
     
-    // Increment student count in course
-    const course = await Course.findById(enrollmentRequest.courseId._id);
-    if (course) {
-      course.students += 1;
-      await course.save();
-    }
-
-    // Send approval email
+    // Send enrollment approval email
+    try {
     await sendEnrollmentApprovalEmail(enrollmentRequest);
+    } catch (emailError) {
+      console.error('Error sending approval email:', emailError);
+      // Continue with the approval process even if email fails
+    }
     
     res.json({ 
-      message: 'Enrollment request approved and notification email sent',
+      message: 'Enrollment request approved successfully',
       enrollmentRequest
     });
     
   } catch (error) {
-    console.error('Approve enrollment error:', error);
+    console.error('Approve enrollment request error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -3783,6 +3896,47 @@ app.delete('/api/admin/enrollment-requests/permanent', authenticateToken, adminM
     });
   } catch (error) {
     console.error('Permanent delete error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Update course progress
+app.put('/api/courses/:courseId/progress', authenticateToken, async (req, res) => {
+  try {
+    const { courseId } = req.params;
+    const { progress, status, completedDays } = req.body;
+    
+    // Try to find course by ID first
+    let course = await Course.findById(courseId);
+    
+    // If not found by ID, try to find by courseUrl
+    if (!course) {
+      course = await Course.findOne({ courseUrl: courseId });
+    }
+    
+    if (!course) {
+      return res.status(404).json({ message: 'Course not found' });
+    }
+    
+    // Find and update user's course progress
+    const enrollment = await UserCourse.findOneAndUpdate(
+      { userId: req.user.id, courseId: course._id },
+      { 
+        progress,
+        status,
+        completedDays,
+        lastAccessedAt: new Date()
+      },
+      { new: true }
+    );
+    
+    if (!enrollment) {
+      return res.status(404).json({ message: 'Enrollment not found' });
+    }
+    
+    res.json(enrollment);
+  } catch (error) {
+    console.error('Update progress error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });

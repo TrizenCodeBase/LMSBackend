@@ -54,10 +54,15 @@ const courseSchema = new mongoose.Schema({
   instructor: { type: String, required: true },
   instructorId: {
     type: mongoose.Schema.Types.ObjectId,
-    ref: 'User'
+    ref: 'User',
+    required: true
+  },
+  courseUrl: {
+    type: String,
+    unique: true
   },
   duration: { type: String, required: true },
-  rating: { type: Number, required: true },
+  rating: { type: Number, default: 0 },
   students: { type: Number, default: 0 },
   level: {
     type: String,
@@ -65,6 +70,7 @@ const courseSchema = new mongoose.Schema({
     required: true
   },
   category: { type: String, required: true },
+  language: { type: String, required: true }, // Programming language or course language
   skills: [{ type: String }],
   courses: [{
     title: { type: String },
@@ -79,9 +85,34 @@ const courseSchema = new mongoose.Schema({
   reviews: [reviewSchema],
   roadmap: [roadmapDaySchema],
   courseAccess: { type: Boolean, default: true },
-  createdAt: { type: Date, default: Date.now }
+  isActive: {
+    type: Boolean,
+    default: true
+  }
+}, {
+  timestamps: true
 });
 
-const Course = mongoose.model('Course', courseSchema);
+// Pre-save middleware to generate courseUrl
+courseSchema.pre('save', async function(next) {
+  if (this.isNew || !this.courseUrl) {
+    // Get last 5 characters of course ID
+    const courseIdSuffix = this._id.toString().slice(-5);
+    
+    // Convert course name to URL-friendly format
+    const courseNameSlug = this.title
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-') // Replace non-alphanumeric chars with hyphens
+      .replace(/^-+|-+$/g, ''); // Remove leading/trailing hyphens
+    
+    // Get instructor's userId
+    const instructor = await mongoose.model('User').findById(this.instructorId);
+    const instructorUserId = instructor ? instructor.userId : 'unknown';
+    
+    // Combine all parts to create courseUrl
+    this.courseUrl = `${courseIdSuffix}-${courseNameSlug}-${instructorUserId}`;
+  }
+  next();
+});
 
-export default Course;
+export default mongoose.model('Course', courseSchema);

@@ -1,6 +1,6 @@
-import mongoose from 'mongoose';
+const mongoose = require('mongoose');
 
-const userCourseSchema = new mongoose.Schema({
+const enrollmentRequestSchema = new mongoose.Schema({
   userId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
@@ -16,33 +16,40 @@ const userCourseSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['pending', 'enrolled', 'started', 'completed'],
-    default: 'enrolled'
+    enum: ['pending', 'approved', 'rejected', 'deleted'],
+    default: 'pending'
   },
-  progress: {
+  paymentScreenshot: {
+    type: String,
+    required: true
+  },
+  transactionId: {
+    type: String,
+    required: true,
+    unique: true
+  },
+  amount: {
     type: Number,
-    default: 0
+    required: true
   },
-  completedDays: [{
-    type: Number
-  }],
-  enrolledAt: {
+  paymentDate: {
     type: Date,
-    default: Date.now
+    required: true
   },
-  lastAccessedAt: {
-    type: Date,
-    default: Date.now
-  }
+  mobileNumber: {
+    type: String,
+    required: true
+  },
+  rejectionReason: String,
+  approvedAt: Date,
+  rejectedAt: Date,
+  deletedAt: Date
 }, {
   timestamps: true
 });
 
-// Add compound index for userId and courseId
-userCourseSchema.index({ userId: 1, courseId: 1 }, { unique: true });
-
 // Pre-save middleware to populate courseUrl
-userCourseSchema.pre('save', async function(next) {
+enrollmentRequestSchema.pre('save', async function(next) {
   if (!this.courseUrl) {
     try {
       const course = await mongoose.model('Course').findById(this.courseId);
@@ -56,4 +63,4 @@ userCourseSchema.pre('save', async function(next) {
   next();
 });
 
-export default mongoose.model('UserCourse', userCourseSchema);
+module.exports = mongoose.model('EnrollmentRequest', enrollmentRequestSchema); 
