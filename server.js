@@ -60,6 +60,7 @@ import UserCourse from './models/UserCourse.js';
 import Discussion from './models/Discussion.js';
 import Notification from './models/Notification.js';
 import QuizSubmission from './models/QuizSubmission.js';
+import Note from './models/Note.js';
 
 // Create Message model schema
 const messageSchema = new mongoose.Schema({
@@ -3938,5 +3939,136 @@ app.put('/api/courses/:courseId/progress', authenticateToken, async (req, res) =
   } catch (error) {
     console.error('Update progress error:', error);
     res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Note Routes
+app.get('/api/notes/:courseId', authenticateToken, async (req, res) => {
+  try {
+    const courseId = req.params.courseId;
+    const userId = req.user.id;
+
+    // Get course ID from either direct ID or courseUrl
+    let actualCourseId = courseId;
+    if (!courseId.match(/^[0-9a-fA-F]{24}$/)) {
+      const course = await Course.findOne({ courseUrl: courseId });
+      if (!course) {
+        return res.status(404).json({ message: 'Course not found' });
+      }
+      actualCourseId = course._id;
+    }
+
+    const notes = await Note.find({
+      userId,
+      courseId: actualCourseId
+    }).sort({ dayNumber: 1 });
+    
+    res.json(notes);
+  } catch (error) {
+    console.error('Error fetching notes:', error);
+    res.status(500).json({ message: 'Failed to fetch notes' });
+  }
+});
+
+app.post('/api/notes', authenticateToken, async (req, res) => {
+  try {
+    const { courseId, dayNumber, content } = req.body;
+    const userId = req.user.id;
+
+    // Get course ID from either direct ID or courseUrl
+    let actualCourseId = courseId;
+    if (!courseId.match(/^[0-9a-fA-F]{24}$/)) {
+      const course = await Course.findOne({ courseUrl: courseId });
+      if (!course) {
+        return res.status(404).json({ message: 'Course not found' });
+      }
+      actualCourseId = course._id;
+    }
+
+    // Validate if user is enrolled in the course
+    const enrollment = await UserCourse.findOne({
+      userId,
+      courseId: actualCourseId,
+      status: { $in: ['enrolled', 'started', 'completed'] }
+    });
+
+    if (!enrollment) {
+      return res.status(403).json({ message: 'You are not enrolled in this course' });
+    }
+
+    // Create or update note
+    const note = await Note.findOneAndUpdate(
+      { userId, courseId: actualCourseId, dayNumber },
+      { content },
+      { new: true, upsert: true }
+    );
+
+    res.status(201).json(note);
+  } catch (error) {
+    console.error('Save note error:', error);
+    res.status(500).json({ message: 'Failed to save note' });
+  }
+});
+
+app.get('/api/notes/:courseId/:dayNumber', authenticateToken, async (req, res) => {
+  try {
+    const { courseId, dayNumber } = req.params;
+    const userId = req.user.id;
+
+    // Find notes directly using courseUrl or courseId
+    const note = await Note.findOne({
+      userId,
+      $or: [
+        { courseId }, // Try with the provided courseId
+        { courseId: { $in: await Course.distinct('_id', { courseUrl: courseId }) } } // Try with course _id from courseUrl
+      ],
+      dayNumber: parseInt(dayNumber)
+    });
+
+    res.json(note || { content: '' });
+  } catch (error) {
+    console.error('Get note error:', error);
+    res.status(500).json({ message: 'Failed to fetch note' });
+  }
+});
+
+app.put('/api/notes/:noteId', authenticateToken, async (req, res) => {
+  try {
+    const { content } = req.body;
+    
+    const note = await Note.findOne({
+      _id: req.params.noteId,
+      userId: req.user.id
+    });
+
+    if (!note) {
+      return res.status(404).json({ message: 'Note not found' });
+    }
+
+    note.content = content;
+    await note.save();
+    
+    res.json(note);
+  } catch (error) {
+    console.error('Error updating note:', error);
+    res.status(500).json({ message: 'Failed to update note' });
+  }
+});
+
+app.delete('/api/notes/:noteId', authenticateToken, async (req, res) => {
+  try {
+    const note = await Note.findOneAndDelete({
+      _id: req.params.noteId,
+      userId: req.user.id
+    });
+
+    if (!note) {
+      return res.status(404).json({ message: 'Note not found' });
+    }
+
+    res.json({ message: 'Note deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting note:', error);
+    res.status(500).json({ message: 'Failed to delete note' });
   }
 });
