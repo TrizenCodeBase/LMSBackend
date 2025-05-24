@@ -1074,6 +1074,7 @@ app.get('/api/admin/enrollment-requests', authenticateToken, adminMiddleware, as
   try {
     const enrollmentRequests = await EnrollmentRequest.find()
       .populate('userId', 'name email userId') // Populate user details
+      .populate('courseId', 'title courseUrl') // Populate course details
       .sort({ createdAt: -1 });
     res.json(enrollmentRequests);
   } catch (error) {
