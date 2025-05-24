@@ -1011,8 +1011,23 @@ app.post('/api/enrollment-requests', authenticateToken, upload.single('transacti
       });
     }
 
-    // Get course details including courseUrl
-    const course = await Course.findById(courseId);
+    // Try to find course by ID first, if that fails, try by courseUrl
+    let course;
+    try {
+      // First try to find by ID if it's a valid ObjectId
+      if (mongoose.Types.ObjectId.isValid(courseId)) {
+        course = await Course.findById(courseId);
+      }
+      
+      // If not found by ID, try by courseUrl
+      if (!course) {
+        course = await Course.findOne({ courseUrl: courseId });
+      }
+    } catch (error) {
+      console.error('Error finding course:', error);
+      return res.status(500).json({ message: 'Error finding course' });
+    }
+
     if (!course) {
       return res.status(404).json({ message: 'Course not found' });
     }
@@ -1022,7 +1037,7 @@ app.post('/api/enrollment-requests', authenticateToken, upload.single('transacti
     
     const enrollmentRequest = new EnrollmentRequest({
       userId: req.user.id,
-      courseId: courseId,
+      courseId: course._id, // Use the actual course._id
       courseUrl: course.courseUrl,
       email,
       mobile,
@@ -1037,13 +1052,13 @@ app.post('/api/enrollment-requests', authenticateToken, upload.single('transacti
     // Mark course as pending in UserCourse collection (if not already enrolled)
     const existingEnrollment = await UserCourse.findOne({ 
       userId: req.user.id,
-      courseId
+      courseId: course._id // Use the actual course._id
     });
     
     if (!existingEnrollment) {
       const enrollment = new UserCourse({
         userId: req.user.id,
-        courseId,
+        courseId: course._id, // Use the actual course._id
         courseUrl: course.courseUrl,
         status: 'pending',
         progress: 0
