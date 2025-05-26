@@ -88,6 +88,24 @@ const courseSchema = new mongoose.Schema({
   isActive: {
     type: Boolean,
     default: true
+  },
+  // Rating statistics
+  averageRating: {
+    type: Number,
+    default: 0,
+    min: 0,
+    max: 5
+  },
+  totalRatings: {
+    type: Number,
+    default: 0,
+    min: 0,
+    validate: {
+      validator: function(v) {
+        return Number.isInteger(v) && v >= 0;
+      },
+      message: props => `${props.value} must be a non-negative integer!`
+    }
   }
 }, {
   timestamps: true
@@ -112,6 +130,44 @@ courseSchema.pre('save', async function(next) {
     // Combine all parts to create courseUrl
     this.courseUrl = `${courseIdSuffix}-${courseNameSlug}-${instructorUserId}`;
   }
+  next();
+});
+
+// Virtual for calculating the current rating
+courseSchema.virtual('currentRating').get(function() {
+  if (this.totalRatings === 0) return 0;
+  return this.averageRating;
+});
+
+// Method to update rating statistics
+courseSchema.methods.updateRatingStats = async function() {
+  // Get all reviews for this course
+  const Review = mongoose.model('Review');
+  const reviews = await Review.find({ courseId: this._id });
+  
+  // Calculate total ratings and average
+  this.totalRatings = reviews.length;
+  
+  if (this.totalRatings > 0) {
+    const totalRatingSum = reviews.reduce((sum, review) => sum + review.rating, 0);
+    this.rating = parseFloat((totalRatingSum / this.totalRatings).toFixed(1));
+    this.averageRating = this.rating;
+  } else {
+    this.rating = 0;
+    this.averageRating = 0;
+  }
+  
+  await this.save();
+};
+
+// Pre-save middleware to ensure rating fields are numbers
+courseSchema.pre('save', function(next) {
+  if (typeof this.rating !== 'undefined') {
+    this.rating = parseFloat(Number(this.rating).toFixed(1));
+  }
+  if (typeof this.averageRating !== 'undefined') {
+    this.averageRating = parseFloat(Number(this.averageRating).toFixed(1));
+    }
   next();
 });
 

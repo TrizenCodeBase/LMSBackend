@@ -61,6 +61,7 @@ import Discussion from './models/Discussion.js';
 import Notification from './models/Notification.js';
 import QuizSubmission from './models/QuizSubmission.js';
 import Note from './models/Note.js';
+import Review from './models/Review.js';
 
 // Create Message model schema
 const messageSchema = new mongoose.Schema({
@@ -1948,7 +1949,7 @@ app.get('/api/instructor/profile', authenticateToken, async (req, res) => {
     const mostRecentReviews = recentReviews.slice(0, 5);
     
     // Calculate average rating
-    const averageRating = reviewCount > 0 ? (totalRating / reviewCount).toFixed(1) : 0;
+    const averageRating = reviewCount > 0 ? parseFloat((totalRating / reviewCount).toFixed(1)) : 0;
     
     // Calculate teaching hours (based on course durations)
     const teachingHours = courses.reduce((sum, course) => {
@@ -2030,59 +2031,83 @@ function calculateProfileCompletion(user) {
 // Submit a review for a course
 app.post('/api/courses/:courseId/reviews', authenticateToken, async (req, res) => {
   try {
-    const { courseId } = req.params;
-    const { rating, comment } = req.body;
-
+    const { rating, comment = '' } = req.body;
+    
     if (!rating || rating < 1 || rating > 5) {
       return res.status(400).json({ message: 'Rating must be between 1 and 5' });
     }
 
-    // Check if user is enrolled in the course
-    const enrollment = await UserCourse.findOne({
-      userId: req.user.id,
+    const courseId = req.params.courseId;
+    const studentId = req.user.id;
+
+    console.log('Review Submission:', {
       courseId,
-      status: { $in: ['enrolled', 'started', 'completed'] }
+      studentId,
+      rating,
+      hasComment: !!comment
     });
 
-    if (!enrollment) {
-      return res.status(403).json({ message: 'You must be enrolled in this course to submit a review' });
+    // Get user details
+    const user = await User.findById(studentId);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
     }
 
-    // Check if user has already submitted a review
+    // Check if course exists
     const course = await Course.findById(courseId);
     if (!course) {
       return res.status(404).json({ message: 'Course not found' });
     }
 
-    const existingReviewIndex = course.reviews.findIndex(
-      review => review.studentId.toString() === req.user.id.toString()
-    );
+    // Check if user has already reviewed this course
+    let review = await Review.findOne({ courseId, studentId });
+    const isUpdate = !!review;
 
-    if (existingReviewIndex !== -1) {
+    if (review) {
       // Update existing review
-      course.reviews[existingReviewIndex].rating = rating;
-      course.reviews[existingReviewIndex].comment = comment;
-      course.reviews[existingReviewIndex].createdAt = new Date();
+      review.rating = rating;
+      review.comment = comment;
+      await review.save();
     } else {
-      // Add new review
-      course.reviews.push({
-        studentId: req.user.id,
-        studentName: req.user.name,
+      // Create new review
+      review = new Review({
+        courseId,
+        studentId,
         rating,
-        comment,
-        createdAt: new Date()
+        comment
       });
+      await review.save();
     }
 
-    // Update course average rating
-    const totalRating = course.reviews.reduce((sum, review) => sum + review.rating, 0);
-    course.rating = totalRating / course.reviews.length;
+      // Update course rating statistics
+    await course.updateRatingStats();
 
-    await course.save();
+    console.log('Review Operation Complete:', {
+      courseId,
+      courseTitle: course.title,
+      operation: isUpdate ? 'Updated' : 'Created',
+      newTotalReviews: course.totalRatings,
+      newRating: course.rating
+    });
 
-    res.json({ message: 'Review submitted successfully', course });
+    // Return the review with user details
+    const populatedReview = await Review.findById(review._id)
+      .populate('studentId', 'name email');
+
+    res.json({
+      _id: populatedReview._id,
+      studentId: populatedReview.studentId._id,
+      studentName: populatedReview.studentId.name,
+      rating: populatedReview.rating,
+      comment: populatedReview.comment,
+      createdAt: populatedReview.createdAt,
+      courseStats: {
+        rating: course.rating,
+        totalRatings: course.totalRatings
+      }
+    });
   } catch (error) {
-    console.error('Submit review error:', error);
+    console.error('Add review error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -2090,14 +2115,20 @@ app.post('/api/courses/:courseId/reviews', authenticateToken, async (req, res) =
 // Get reviews for a course
 app.get('/api/courses/:courseId/reviews', async (req, res) => {
   try {
-    const { courseId } = req.params;
-    const course = await Course.findById(courseId);
-    
-    if (!course) {
-      return res.status(404).json({ message: 'Course not found' });
-    }
-    
-    res.json(course.reviews);
+    const reviews = await Review.find({ courseId: req.params.courseId })
+      .populate('studentId', 'name email')
+      .sort({ createdAt: -1 });
+
+    const formattedReviews = reviews.map(review => ({
+      _id: review._id,
+      studentId: review.studentId._id,
+      studentName: review.studentId.name,
+      rating: review.rating,
+      comment: review.comment,
+      createdAt: review.createdAt
+    }));
+
+    res.json(formattedReviews);
   } catch (error) {
     console.error('Get reviews error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -4086,5 +4117,279 @@ app.delete('/api/notes/:noteId', authenticateToken, async (req, res) => {
   } catch (error) {
     console.error('Error deleting note:', error);
     res.status(500).json({ message: 'Failed to delete note' });
+  }
+});
+
+// Add or update a review
+app.post('/api/courses/:courseId/reviews', authenticateToken, async (req, res) => {
+  try {
+    const { rating, comment } = req.body;
+    const courseId = req.params.courseId;
+    const studentId = req.user.id;
+
+    // Get user details
+    const user = await User.findById(studentId);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    // Check if user has already reviewed this course
+    let review = await Review.findOne({ courseId, studentId });
+
+    if (review) {
+      // Update existing review
+      review.rating = rating;
+      review.comment = comment;
+      await review.save();
+    } else {
+      // Create new review
+      review = new Review({
+        courseId,
+        studentId,
+        rating,
+        comment
+      });
+      await review.save();
+    }
+
+    // Return the review with user details
+    const populatedReview = await Review.findById(review._id)
+      .populate('studentId', 'name email');
+
+    res.json({
+      _id: populatedReview._id,
+      studentId: populatedReview.studentId._id,
+      studentName: populatedReview.studentId.name,
+      rating: populatedReview.rating,
+      comment: populatedReview.comment,
+      createdAt: populatedReview.createdAt
+    });
+  } catch (error) {
+    console.error('Add review error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Update a review
+app.put('/api/courses/:courseId/reviews', authenticateToken, async (req, res) => {
+  try {
+    const { rating, comment } = req.body;
+    const courseId = req.params.courseId;
+    const studentId = req.user.id;
+
+    const review = await Review.findOne({ courseId, studentId });
+
+    if (!review) {
+      return res.status(404).json({ message: 'Review not found' });
+    }
+
+    review.rating = rating;
+    review.comment = comment;
+    await review.save();
+
+    // Return the updated review with user details
+    const populatedReview = await Review.findById(review._id)
+      .populate('studentId', 'name email');
+
+    res.json({
+      _id: populatedReview._id,
+      studentId: populatedReview.studentId._id,
+      studentName: populatedReview.studentId.name,
+      rating: populatedReview.rating,
+      comment: populatedReview.comment,
+      createdAt: populatedReview.createdAt
+    });
+  } catch (error) {
+    console.error('Update review error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Delete a review
+app.delete('/api/courses/:courseId/reviews/:reviewId', authenticateToken, async (req, res) => {
+  try {
+    const { courseId, reviewId } = req.params;
+    
+    // Find and delete the review
+    const review = await Review.findOneAndDelete({
+      _id: reviewId,
+      courseId,
+      studentId: req.user.id
+    });
+
+    if (!review) {
+      return res.status(404).json({ message: 'Review not found' });
+    }
+
+    // Update course rating statistics
+    const course = await Course.findById(courseId);
+    if (course) {
+      await course.updateRatingStats();
+    }
+
+    res.json({ message: 'Review deleted successfully' });
+  } catch (error) {
+    console.error('Delete review error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Get user's review for a course
+app.get('/api/courses/:courseId/reviews/my-review', authenticateToken, async (req, res) => {
+  try {
+    const review = await Review.findOne({
+      courseId: req.params.courseId,
+      studentId: req.user.id
+    }).populate('studentId', 'name email');
+
+    if (!review) {
+      return res.status(404).json({ message: 'Review not found' });
+    }
+
+    res.json({
+      _id: review._id,
+      studentId: review.studentId._id,
+      studentName: review.studentId.name,
+      rating: review.rating,
+      comment: review.comment,
+      createdAt: review.createdAt
+    });
+  } catch (error) {
+    console.error('Get user review error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Get review count for a specific course
+app.get('/api/courses/:courseId/review-count', async (req, res) => {
+  try {
+    const courseId = req.params.courseId;
+    
+    // Count reviews for specific course
+    const reviewCount = await Review.countDocuments({ courseId });
+    
+    console.log('Review count for course:', {
+      courseId,
+      totalReviews: reviewCount
+    });
+
+    res.json({ count: reviewCount });
+  } catch (error) {
+    console.error('Error getting review count:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Get review counts grouped by course
+app.get('/api/courses/review-counts/all', async (req, res) => {
+  try {
+    // Aggregate to get review counts per course
+    const reviewCounts = await Review.aggregate([
+      {
+        $group: {
+          _id: '$courseId',
+          count: { $sum: 1 }
+        }
+      },
+      {
+        $lookup: {
+          from: 'courses',
+          localField: '_id',
+          foreignField: '_id',
+          as: 'course'
+        }
+      },
+      {
+        $unwind: '$course'
+      },
+      {
+        $project: {
+          courseId: '$_id',
+          courseTitle: '$course.title',
+          reviewCount: '$count'
+        }
+      }
+    ]);
+
+    console.log('Review counts for all courses:', reviewCounts);
+
+    res.json(reviewCounts);
+  } catch (error) {
+    console.error('Error getting review counts:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Log review counts on server start
+const logReviewCounts = async () => {
+  try {
+    // Get all courses
+    const courses = await Course.find({});
+    
+    // For each course, get review count
+    for (const course of courses) {
+      const reviewCount = await Review.countDocuments({ courseId: course._id });
+      console.log(`Course: ${course.title}`);
+      console.log(`ID: ${course._id}`);
+      console.log(`Review Count: ${reviewCount}`);
+      console.log('------------------------');
+    }
+
+    // Get grouped counts
+    const groupedCounts = await Review.aggregate([
+      {
+        $group: {
+          _id: '$courseId',
+          count: { $sum: 1 }
+        }
+      }
+    ]);
+
+    console.log('Aggregated Review Counts:');
+    console.log(JSON.stringify(groupedCounts, null, 2));
+    
+  } catch (error) {
+    console.error('Error logging review counts:', error);
+  }
+};
+
+// Call the logging function when server starts
+logReviewCounts();
+
+// Get all review counts in one call
+app.get('/api/review-counts', async (req, res) => {
+  try {
+    const reviewCounts = await Review.aggregate([
+      {
+        $group: {
+          _id: '$courseId',
+          count: { $sum: 1 },
+          averageRating: { $avg: '$rating' }
+        }
+      },
+      {
+        $project: {
+          courseId: '$_id',
+          totalReviews: '$count',
+          rating: { $round: ['$averageRating', 1] }
+        }
+      }
+    ]);
+
+    console.log('Fetched review counts:', reviewCounts);
+    
+    // Convert array to object with courseId as key for easier frontend lookup
+    const reviewCountsMap = reviewCounts.reduce((acc, item) => {
+      acc[item.courseId] = {
+        totalReviews: item.totalReviews,
+        rating: item.rating || 0
+      };
+      return acc;
+    }, {});
+
+    res.json(reviewCountsMap);
+  } catch (error) {
+    console.error('Error getting review counts:', error);
+    res.status(500).json({ message: 'Server error' });
   }
 });
