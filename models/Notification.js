@@ -8,46 +8,33 @@ const notificationSchema = new mongoose.Schema({
   },
   type: {
     type: String,
-    enum: ['course_update', 'assignment', 'discussion', 'new_day', 'message'],
+    enum: ['message', 'discussion', 'course', 'system'],
     required: true
   },
   title: {
     type: String,
     required: true
   },
-  message: {
-    type: String,
-    required: true
-  },
+  message: String,
   courseId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Course'
   },
-  assignmentId: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'Assignment'
-  },
-  discussionId: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'Discussion'
-  },
+  link: String,
   read: {
     type: Boolean,
     default: false
-  },
-  link: {
-    type: String
   },
   timestamp: {
     type: Date,
     default: Date.now
   }
+}, {
+  timestamps: true
 });
 
 // Create indexes for efficient querying
 notificationSchema.index({ userId: 1, timestamp: -1 });
 notificationSchema.index({ userId: 1, read: 1 });
 
-const Notification = mongoose.model('Notification', notificationSchema);
-
-export default Notification; 
+export default mongoose.model('Notification', notificationSchema); 

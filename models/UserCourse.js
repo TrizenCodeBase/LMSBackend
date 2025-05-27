@@ -26,6 +26,10 @@ const userCourseSchema = new mongoose.Schema({
   completedDays: [{
     type: Number
   }],
+  daysCompletedPerDuration: {
+    type: String,
+    default: '0/0'
+  },
   enrolledAt: {
     type: Date,
     default: Date.now

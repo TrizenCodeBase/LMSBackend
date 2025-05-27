@@ -1,18 +1,13 @@
 import mongoose from 'mongoose';
 
 const quizSubmissionSchema = new mongoose.Schema({
-  studentId: {
+  courseUrl: {
+    type: String,
+    required: true
+  },
+  userId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
-    required: true
-  },
-  courseId: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'Course',
-    required: true
-  },
-  courseName: {
-    type: String,
     required: true
   },
   dayNumber: {
@@ -28,62 +23,53 @@ const quizSubmissionSchema = new mongoose.Schema({
     options: [{
       text: String,
       isCorrect: Boolean
-    }],
-    explanation: String
+    }]
   }],
-  selectedAnswers: {
-    type: Map,
-    of: String
-  },
+  selectedAnswers: [Number],
   score: {
     type: Number,
-    required: true,
-    min: 0,
-    max: 100
+    required: true
   },
   submittedDate: {
     type: Date,
     default: Date.now
   },
-  completedAt: {
-    type: Date,
-    default: Date.now,
-    required: true
-  },
-  isCompleted: {
-    type: Boolean,
-    default: true,
-    required: true
-  },
-  status: {
-    type: String,
-    enum: ['completed', 'graded'],
-    default: 'completed'
+  attemptNumber: {
+    type: Number,
+    required: true,
+    min: 1
   }
 }, {
   timestamps: true
 });
 
-// Create compound index to prevent duplicate submissions
-quizSubmissionSchema.index({ studentId: 1, courseId: 1, dayNumber: 1 }, { unique: true });
+// Drop any existing indexes
+quizSubmissionSchema.indexes().forEach(index => {
+  quizSubmissionSchema.index(index.fields, { background: true, unique: false });
+});
 
-// Pre-save middleware to ensure completion status
-quizSubmissionSchema.pre('save', function(next) {
-  if (this.score >= 0) {
-    this.isCompleted = true;
-    this.status = 'completed';
-    if (!this.completedAt) {
-      this.completedAt = new Date();
+// Create a new compound unique index
+quizSubmissionSchema.index(
+  { userId: 1, courseUrl: 1, dayNumber: 1, attemptNumber: 1 },
+  { unique: true, background: true }
+);
+
+// Add a pre-save hook to ensure attemptNumber is set
+quizSubmissionSchema.pre('save', async function(next) {
+  if (this.isNew && !this.attemptNumber) {
+    try {
+      const lastSubmission = await this.constructor.findOne({
+        userId: this.userId,
+        courseUrl: this.courseUrl,
+        dayNumber: this.dayNumber
+      }).sort({ attemptNumber: -1 });
+
+      this.attemptNumber = lastSubmission ? lastSubmission.attemptNumber + 1 : 1;
+    } catch (error) {
+      return next(error);
     }
   }
   next();
 });
 
-// Method to check if quiz is completed
-quizSubmissionSchema.methods.isQuizCompleted = function() {
-  return this.isCompleted && this.completedAt != null;
-};
-
-const QuizSubmission = mongoose.model('QuizSubmission', quizSubmissionSchema);
-
-export default QuizSubmission; 
+export default mongoose.model('QuizSubmission', quizSubmissionSchema); 

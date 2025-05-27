@@ -1,4 +1,4 @@
-import * as Minio from 'minio';
+import { Client } from 'minio';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -11,7 +11,8 @@ console.log(`MINIO_USE_SSL: ${process.env.MINIO_USE_SSL === 'true'}`);
 console.log(`MINIO_ACCESS_KEY: ${process.env.MINIO_ACCESS_KEY ? 'Set' : 'Missing'}`);
 console.log(`MINIO_SECRET_KEY: ${process.env.MINIO_SECRET_KEY ? 'Set' : 'Missing'}`);
 
-const minioClient = new Minio.Client({
+// Create MinIO client
+const minioClient = new Client({
   endPoint: process.env.MINIO_ENDPOINT || 'localhost',
   port: parseInt(process.env.MINIO_PORT) || 9000,
   useSSL: process.env.MINIO_USE_SSL === 'true',
@@ -40,33 +41,39 @@ const ensureBucketExists = async (bucketName) => {
   }
 };
 
-// Helper function to upload payment screenshots
-const uploadPaymentScreenshot = async (file, filename) => {
-  const bucketName = 'payment-screenshots';
-  await ensureBucketExists(bucketName);
-  
-  const objectName = `${Date.now()}-${filename}`;
-  const metaData = {
-    'Content-Type': file.mimetype,
-  };
-
-  await minioClient.putObject(bucketName, objectName, file.buffer, metaData);
-  return `${bucketName}/${objectName}`;
-};
-
-// Helper function to get file URL
-const getFileUrl = async (bucketName, objectName) => {
+// Upload payment screenshot to MinIO
+export const uploadPaymentScreenshot = async (file, filename) => {
   try {
-    return await minioClient.presignedGetObject(bucketName, objectName, 24 * 60 * 60); // 24 hours expiry
+    const bucket = 'payment-screenshots';
+  const objectName = `${Date.now()}-${filename}`;
+    
+    // Ensure bucket exists
+    const bucketExists = await minioClient.bucketExists(bucket);
+    if (!bucketExists) {
+      await minioClient.makeBucket(bucket);
+    }
+    
+    // Upload file
+    await minioClient.putObject(bucket, objectName, file.buffer, {
+      'Content-Type': file.mimetype
+    });
+    
+    return `${bucket}/${objectName}`;
   } catch (error) {
-    console.error('Error generating presigned URL:', error);
-    throw error;
+    console.error('MinIO upload error:', error);
+    throw new Error('Failed to upload file');
   }
 };
 
-export {
-  minioClient,
-  uploadPaymentScreenshot,
-  getFileUrl,
-  ensureBucketExists
+// Get presigned URL for file access
+export const getFileUrl = async (bucket, filename) => {
+  try {
+    const url = await minioClient.presignedGetObject(bucket, filename, 24 * 60 * 60); // 24 hour expiry
+    return url;
+  } catch (error) {
+    console.error('MinIO get URL error:', error);
+    throw new Error('Failed to generate file URL');
+  }
 };
+
+export { minioClient, ensureBucketExists };

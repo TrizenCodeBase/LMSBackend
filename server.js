@@ -12,6 +12,8 @@ import fs from 'fs';
 import nodemailer from 'nodemailer';
 import { uploadPaymentScreenshot, getFileUrl } from './minioClient.js';
 import { generateRandomString } from './models/generateUserId.js';
+import courseRoutes from './routes/courses.js';
+import apiRoutes from './routes/api.js';
 
 // Get __dirname equivalent in ES modules
 const __filename = fileURLToPath(import.meta.url);
@@ -26,6 +28,10 @@ const app = express();
 // Middleware
 app.use(express.json());
 app.use(cors());
+
+// Mount routes
+app.use('/api/courses', courseRoutes);
+app.use('/api', apiRoutes);
 
 // Create uploads directory if it doesn't exist
 const uploadsDir = path.join(__dirname, 'uploads');
@@ -432,7 +438,8 @@ const authenticateToken = (req, res, next) => {
       
       // Get complete user information from database
       try {
-        const user = await User.findById(decoded.id).select('-password');
+        const userId = decoded.userId || decoded.id; // Handle both formats
+        const user = await User.findById(userId).select('-password');
         if (!user) {
           return res.status(404).json({ message: 'User not found' });
         }
@@ -3952,7 +3959,7 @@ app.delete('/api/admin/enrollment-requests/permanent', authenticateToken, adminM
 app.put('/api/courses/:courseId/progress', authenticateToken, async (req, res) => {
   try {
     const { courseId } = req.params;
-    const { progress, status, completedDays } = req.body;
+    const { completedDays } = req.body;
     
     // Try to find course by ID first
     let course = await Course.findById(courseId);
@@ -3965,6 +3972,32 @@ app.put('/api/courses/:courseId/progress', authenticateToken, async (req, res) =
     if (!course) {
       return res.status(404).json({ message: 'Course not found' });
     }
+
+    // Extract total duration days from course duration
+    const extractDurationDays = (duration) => {
+      const match = duration.match(/\d+/);
+      return match ? parseInt(match[0]) : 0;
+    };
+    
+    // Calculate total duration days
+    const totalDurationDays = course.duration ? extractDurationDays(course.duration) : 0;
+    
+    if (totalDurationDays === 0) {
+      return res.status(400).json({ message: 'Invalid course duration' });
+    }
+
+    // Calculate progress based on completed days and total duration
+    const completedDaysCount = completedDays?.length || 0;
+    const progress = Math.round((completedDaysCount / totalDurationDays) * 100);
+    const daysCompletedPerDuration = `${completedDaysCount}/${totalDurationDays}`;
+
+    // Determine status based on progress
+    let status = 'enrolled';
+    if (progress === 100) {
+      status = 'completed';
+    } else if (progress > 0) {
+      status = 'started';
+    }
     
     // Find and update user's course progress
     const enrollment = await UserCourse.findOneAndUpdate(
@@ -3973,6 +4006,7 @@ app.put('/api/courses/:courseId/progress', authenticateToken, async (req, res) =
         progress,
         status,
         completedDays,
+        daysCompletedPerDuration,
         lastAccessedAt: new Date()
       },
       { new: true }
@@ -3982,7 +4016,10 @@ app.put('/api/courses/:courseId/progress', authenticateToken, async (req, res) =
       return res.status(404).json({ message: 'Enrollment not found' });
     }
     
-    res.json(enrollment);
+    res.json({
+      ...enrollment.toObject(),
+      daysCompletedPerDuration
+    });
   } catch (error) {
     console.error('Update progress error:', error);
     res.status(500).json({ message: 'Server error' });
