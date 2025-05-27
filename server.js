@@ -157,6 +157,10 @@ const enrollmentRequestSchema = new mongoose.Schema({
     enum: ['pending', 'approved', 'rejected'],
     default: 'pending',
   },
+  referredBy: {
+    type: String,
+    default: ''
+  }
 }, { timestamps: true });
 
 const EnrollmentRequest = mongoose.model('EnrollmentRequest', enrollmentRequestSchema);
@@ -1052,6 +1056,7 @@ app.post('/api/enrollment-requests', authenticateToken, upload.single('transacti
       courseName,
       transactionId,
       transactionScreenshot: screenshotPath,
+      referredBy: req.body.referralBy, // Add the referredBy field
       status: 'pending'
     });
     

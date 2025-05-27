@@ -19,7 +19,7 @@ const enrollmentRequestSchema = new mongoose.Schema({
     enum: ['pending', 'approved', 'rejected', 'deleted'],
     default: 'pending'
   },
-  paymentScreenshot: {
+  transactionScreenshot: {
     type: String,
     required: true
   },
@@ -39,6 +39,10 @@ const enrollmentRequestSchema = new mongoose.Schema({
   mobileNumber: {
     type: String,
     required: true
+  },
+  referredBy: {
+    type: String,
+    default: ''
   },
   rejectionReason: String,
   approvedAt: Date,
@@ -63,4 +67,4 @@ enrollmentRequestSchema.pre('save', async function(next) {
   next();
 });
 
-module.exports = mongoose.model('EnrollmentRequest', enrollmentRequestSchema); 
+module.exports = mongoose.model('EnrollmentRequest', enrollmentRequestSchema);

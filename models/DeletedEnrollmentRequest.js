@@ -23,7 +23,7 @@ const deletedEnrollmentRequestSchema = new mongoose.Schema({
     enum: ['pending', 'approved', 'rejected', 'deleted'],
     default: 'pending'
   },
-  paymentScreenshot: {
+  transactionScreenshot: {
     type: String,
     required: true
   },
