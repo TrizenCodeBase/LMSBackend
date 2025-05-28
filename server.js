@@ -11,7 +11,7 @@ import { dirname } from 'path';
 import fs from 'fs';
 import nodemailer from 'nodemailer';
 import { uploadPaymentScreenshot, getFileUrl } from './minioClient.js';
-import { generateRandomString } from './models/generateUserId.js';
+import { generateRandomString, generateInstructorId } from './models/generateUserId.js';
 import courseRoutes from './routes/courses.js';
 import apiRoutes from './routes/api.js';
 
@@ -672,7 +672,9 @@ app.get('/api/courses/:id', async (req, res) => {
     // Check if the ID is a valid ObjectId
     if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
       // If not a valid ObjectId, try to find by courseUrl
-      const courseByUrl = await Course.findOne({ courseUrl: req.params.id }).select('-__v');
+      const courseByUrl = await Course.findOne({ courseUrl: req.params.id })
+        .select('-__v')
+        .populate('instructorId', 'name email profilePicture bio userId'); // Include profilePicture
       if (!courseByUrl) {
         return res.status(404).json({ message: 'Course not found' });
       }
@@ -704,7 +706,7 @@ app.get('/api/courses/:id', async (req, res) => {
         }
       }
       
-      // Add enrollment status to course
+      // Add enrollment status and instructor details to course
       const courseObj = courseByUrl.toObject();
       if (enrollmentStatus) {
         courseObj.enrollmentStatus = enrollmentStatus.status;
@@ -712,11 +714,24 @@ app.get('/api/courses/:id', async (req, res) => {
         courseObj.completedDays = enrollmentStatus.completedDays;
       }
       
+      // Add instructor details
+      if (courseObj.instructorId) {
+        courseObj.instructorDetails = {
+          name: courseObj.instructorId.name,
+          email: courseObj.instructorId.email,
+          profilePicture: courseObj.instructorId.profilePicture,
+          bio: courseObj.instructorId.bio,
+          userId: courseObj.instructorId.userId
+        };
+      }
+      
       return res.json(courseObj);
     }
     
     // If it is a valid ObjectId, try to find by ID
-    const course = await Course.findById(req.params.id).select('-__v');
+    const course = await Course.findById(req.params.id)
+      .select('-__v')
+      .populate('instructorId', 'name email profilePicture bio userId'); // Include profilePicture
     if (!course) {
       return res.status(404).json({ message: 'Course not found' });
     }
@@ -748,12 +763,23 @@ app.get('/api/courses/:id', async (req, res) => {
       }
     }
     
-    // Add enrollment status to course
+    // Add enrollment status and instructor details to course
     const courseObj = course.toObject();
     if (enrollmentStatus) {
       courseObj.enrollmentStatus = enrollmentStatus.status;
       courseObj.progress = enrollmentStatus.progress;
       courseObj.completedDays = enrollmentStatus.completedDays;
+    }
+    
+    // Add instructor details
+    if (courseObj.instructorId) {
+      courseObj.instructorDetails = {
+        name: courseObj.instructorId.name,
+        email: courseObj.instructorId.email,
+        profilePicture: courseObj.instructorId.profilePicture,
+        bio: courseObj.instructorId.bio,
+        userId: courseObj.instructorId.userId
+      };
     }
     
     res.json(courseObj);
@@ -1698,14 +1724,24 @@ app.put('/api/admin/instructor-applications/:id', authenticateToken, adminMiddle
     const { id } = req.params;
     const { status } = req.body;
 
+    // Validate ObjectId
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid instructor ID format' });
+    }
+
     const instructor = await User.findById(id);
     if (!instructor) {
       return res.status(404).json({ message: 'Instructor not found' });
     }
 
-    // If status is rejected, send rejection email and delete the instructor
+    // Validate that this is actually an instructor
+    if (instructor.role !== 'instructor') {
+      return res.status(400).json({ message: 'User is not an instructor' });
+    }
+
+    // If status is rejected, send rejection email and update status
     if (status === 'rejected') {
-      // Prepare email for rejected application before deleting the user
+      // Prepare email for rejected application
       const emailSubject = 'Update on Your Trizen Instructor Application';
       const emailContent = `
         <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto;">
@@ -1753,59 +1789,74 @@ app.put('/api/admin/instructor-applications/:id', authenticateToken, adminMiddle
         html: emailContent
       };
 
+      try {
       // Send the email
       await transporter.sendMail(mailOptions);
+      } catch (emailError) {
+        console.error('Error sending rejection email:', emailError);
+        // Continue with the rejection even if email fails
+      }
 
-      // Delete the instructor from database
-      await User.findByIdAndDelete(id);
+      // Update the instructor status
+      instructor.status = status;
+      await instructor.save();
 
       return res.json({ 
-        message: 'Instructor application rejected and record deleted',
+        message: 'Instructor application rejected successfully',
         instructor: {
           id: instructor._id,
           name: instructor.name,
           email: instructor.email,
-          status: 'rejected'
+          status: instructor.status
         }
       });
-    } else {
-      // For approved status, update the record
+    } 
+    
+    // For approved status
+    if (status === 'approved') {
+      // Generate userId if not already set
+      if (!instructor.userId) {
+        instructor.userId = generateInstructorId();
+      }
+
+      // Update the instructor status
       instructor.status = status;
       await instructor.save();
 
-      // Send email notification to instructor for approval
+      // Send approval email
       const emailSubject = '🎉 Welcome to Trizen - Your Instructor Application is Approved!';
       const emailContent = `
         <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto;">
-          <div style="background-color: #007BFF; padding: 20px; text-align: center;">
+          <div style="background-color: #28a745; padding: 20px; text-align: center;">
             <h1 style="color: white; margin: 0;">Welcome to Trizen!</h1>
           </div>
           
           <div style="padding: 20px; background-color: #f8f9fa;">
             <p>Dear ${instructor.name},</p>
             
-            <p>We are thrilled to inform you that your application to become an instructor at Trizen has been approved! 🎉</p>
+            <p>Congratulations! Your application to become an instructor at Trizen has been approved. We're excited to have you join our teaching community.</p>
             
             <div style="background-color: white; padding: 20px; border-radius: 5px; margin: 20px 0;">
-              <h3 style="color: #007BFF; margin-top: 0;">What's Next?</h3>
+              <h3 style="color: #28a745;">Next Steps:</h3>
               <ul style="list-style-type: none; padding-left: 0;">
-                <li style="margin: 10px 0;">📚 Create and publish your courses</li>
-                <li style="margin: 10px 0;">🎯 Access your instructor dashboard</li>
-                <li style="margin: 10px 0;">📊 Track your course performance</li>
-                <li style="margin: 10px 0;">👥 Connect with your students</li>
+                <li style="margin: 10px 0;">📝 Complete your instructor profile</li>
+                <li style="margin: 10px 0;">🎥 Create your first course</li>
+                <li style="margin: 10px 0;">📚 Review our teaching guidelines</li>
               </ul>
             </div>
 
-            <p><strong>Getting Started:</strong></p>
-            <ol>
-              <li>Log in to your account</li>
-              <li>Visit the instructor dashboard</li>
-              <li>Complete your instructor profile</li>
-              <li>Start creating your first course</li>
-            </ol>
+            <p>As a Trizen instructor, you now have access to:</p>
+            <ul>
+              <li>Course creation tools</li>
+              <li>Teaching resources and guides</li>
+              <li>Instructor community forums</li>
+              <li>Analytics and performance tracking</li>
+            </ul>
 
-            <p>Our team is here to support you every step of the way. If you need any assistance, don't hesitate to reach out to our support team.</p>
-            
+            <p>Your Instructor ID: ${instructor.userId}</p>
+            <p>Please keep this ID for your records. You'll need it for various instructor-related activities.</p>
+
+            <p>If you have any questions, our instructor support team is here to help you succeed.</p>
           </div>
 
           <div style="background-color: #f1f1f1; padding: 20px; text-align: center; font-size: 12px; color: #666;">
@@ -1822,21 +1873,32 @@ app.put('/api/admin/instructor-applications/:id', authenticateToken, adminMiddle
         html: emailContent
       };
 
+      try {
+        // Send the email
       await transporter.sendMail(mailOptions);
+      } catch (emailError) {
+        console.error('Error sending approval email:', emailError);
+        // Continue with the approval even if email fails
+      }
 
-      res.json({ 
+      return res.json({ 
         message: 'Instructor application approved successfully',
         instructor: {
           id: instructor._id,
           name: instructor.name,
           email: instructor.email,
-          status: instructor.status
+          status: instructor.status,
+          userId: instructor.userId
         }
       });
     }
+
+    // If status is neither approved nor rejected
+    return res.status(400).json({ message: 'Invalid status. Must be either approved or rejected.' });
+
   } catch (error) {
     console.error('Update instructor application error:', error);
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
 
