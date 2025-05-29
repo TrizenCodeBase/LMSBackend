@@ -1028,10 +1028,31 @@ const adminMiddleware = async (req, res, next) => {
 // Submit enrollment request
 app.post('/api/enrollment-requests', authenticateToken, upload.single('transactionScreenshot'), async (req, res) => {
   try {
-    const { email, mobile, transactionId, courseName, courseId } = req.body;
+    const { email, mobile, transactionId, courseName, courseId, referralBy } = req.body;
     
-    if (!email || !mobile || !transactionId || !courseName || !courseId || !req.file) {
-      return res.status(400).json({ message: 'All fields and file are required' });
+    // Log the received data for debugging
+    console.log('Received enrollment request:', {
+      email, mobile, transactionId, courseName, courseId, referralBy,
+      file: req.file ? 'Present' : 'Missing'
+    });
+
+    // Validate required fields
+    const requiredFields = { email, mobile, transactionId, courseName, courseId };
+    const missingFields = Object.entries(requiredFields)
+      .filter(([_, value]) => !value)
+      .map(([key]) => key);
+
+    if (missingFields.length > 0) {
+      return res.status(400).json({ 
+        message: `Missing required fields: ${missingFields.join(', ')}`,
+        receivedData: requiredFields
+      });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({ 
+        message: 'Transaction screenshot is required'
+      });
     }
 
     // Validate transactionId format
@@ -1061,28 +1082,43 @@ app.post('/api/enrollment-requests', authenticateToken, upload.single('transacti
       if (!course) {
         course = await Course.findOne({ courseUrl: courseId });
       }
+
+      if (!course) {
+        return res.status(404).json({ 
+          message: 'Course not found',
+          courseId
+        });
+      }
     } catch (error) {
       console.error('Error finding course:', error);
-      return res.status(500).json({ message: 'Error finding course' });
-    }
-
-    if (!course) {
-      return res.status(404).json({ message: 'Course not found' });
+      return res.status(500).json({ 
+        message: 'Error finding course',
+        error: error.message
+      });
     }
 
     // Upload file to Minio
-    const screenshotPath = await uploadPaymentScreenshot(req.file, req.file.originalname);
+    let screenshotPath;
+    try {
+      screenshotPath = await uploadPaymentScreenshot(req.file, req.file.originalname);
+    } catch (uploadError) {
+      console.error('Error uploading screenshot:', uploadError);
+      return res.status(500).json({ 
+        message: 'Error uploading transaction screenshot',
+        error: uploadError.message
+      });
+    }
     
     const enrollmentRequest = new EnrollmentRequest({
       userId: req.user.id,
-      courseId: course._id, // Use the actual course._id
+      courseId: course._id,
       courseUrl: course.courseUrl,
       email,
       mobile,
       courseName,
       transactionId,
       transactionScreenshot: screenshotPath,
-      referredBy: req.body.referralBy, // Add the referredBy field
+      referredBy: referralBy || '',
       status: 'pending'
     });
     
@@ -1091,13 +1127,13 @@ app.post('/api/enrollment-requests', authenticateToken, upload.single('transacti
     // Mark course as pending in UserCourse collection (if not already enrolled)
     const existingEnrollment = await UserCourse.findOne({ 
       userId: req.user.id,
-      courseId: course._id // Use the actual course._id
+      courseId: course._id
     });
     
     if (!existingEnrollment) {
       const enrollment = new UserCourse({
         userId: req.user.id,
-        courseId: course._id, // Use the actual course._id
+        courseId: course._id,
         courseUrl: course.courseUrl,
         status: 'pending',
         progress: 0
@@ -1119,7 +1155,10 @@ app.post('/api/enrollment-requests', authenticateToken, upload.single('transacti
     
   } catch (error) {
     console.error('Enrollment request error:', error);
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ 
+      message: 'Server error processing enrollment request',
+      error: error.message
+    });
   }
 });
 
@@ -1148,6 +1187,15 @@ app.put('/api/admin/enrollment-requests/:id/approve', authenticateToken, adminMi
       return res.status(404).json({ message: 'Enrollment request not found' });
     }
     
+    // Only proceed if not already approved
+    const wasPending = enrollmentRequest.status !== 'approved';
+    if (!wasPending) {
+      return res.json({ 
+        message: 'Enrollment request was already approved',
+        enrollmentRequest
+      });
+    }
+
     // Update request status and approvedAt timestamp
     enrollmentRequest.status = 'approved';
     enrollmentRequest.approvedAt = new Date();
@@ -1158,12 +1206,14 @@ app.put('/api/admin/enrollment-requests/:id/approve', authenticateToken, adminMi
     const courseUrl = course?.courseUrl;
     
     // Update user course enrollment
+    let alreadyEnrolled = false;
     const existingEnrollment = await UserCourse.findOne({ 
       userId: enrollmentRequest.userId._id,
       courseId: enrollmentRequest.courseId._id
     });
     
     if (existingEnrollment) {
+      alreadyEnrolled = existingEnrollment.status === 'enrolled';
       existingEnrollment.status = 'enrolled';
       existingEnrollment.courseUrl = courseUrl;
       await existingEnrollment.save();
@@ -1175,20 +1225,45 @@ app.put('/api/admin/enrollment-requests/:id/approve', authenticateToken, adminMi
         status: 'enrolled',
         progress: 0
       });
-      
       await enrollment.save();
+    }
+    
+    // Handle course student count and referral updates
+    if (course && !alreadyEnrolled) {
+      // Increment course students count
+      course.students = (course.students || 0) + 1;
+      await course.save();
+
+      // Update referral count if there's a referrer
+      if (enrollmentRequest.referredBy) {
+        try {
+          const updatedReferrer = await User.findOneAndUpdate(
+            { userId: enrollmentRequest.referredBy },
+            { $inc: { referralCount: 1 } },
+            { new: true }
+          );
+
+          if (!updatedReferrer) {
+            console.warn(`Referrer with userId ${enrollmentRequest.referredBy} not found`);
+          } else {
+            console.log(`Updated referral count for user ${updatedReferrer.name} to ${updatedReferrer.referralCount}`);
+          }
+        } catch (referralError) {
+          console.error('Error updating referral count:', referralError);
+          // Continue with the approval process even if referral update fails
+        }
+      }
     }
     
     // Send enrollment approval email
     try {
-    await sendEnrollmentApprovalEmail(enrollmentRequest);
+      await sendEnrollmentApprovalEmail(enrollmentRequest);
     } catch (emailError) {
       console.error('Error sending approval email:', emailError);
-      // Continue with the approval process even if email fails
     }
     
     res.json({ 
-      message: 'Enrollment request approved successfully',
+      message: 'Enrollment request approved and referral updated successfully',
       enrollmentRequest
     });
     
@@ -4495,5 +4570,107 @@ app.get('/api/review-counts', async (req, res) => {
   } catch (error) {
     console.error('Error getting review counts:', error);
     res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Add this new endpoint for checking enrollment
+app.get('/api/check-enrollment/:courseId', authenticateToken, async (req, res) => {
+  try {
+    const courseIdentifier = req.params.courseId;
+    const userId = req.user.id;
+
+    // First check if the course exists
+    let course;
+    
+    // Try to find by courseUrl first
+    course = await Course.findOne({ courseUrl: courseIdentifier });
+    
+    // If not found by courseUrl, try to find by courseId
+    if (!course) {
+      // Extract the course ID from the URL format (e.g., "d5c63-web-development-bootcamp-TIN59PR")
+      const courseIdMatch = courseIdentifier.match(/^([a-f0-9]{5})-/);
+      if (courseIdMatch) {
+        // Search for any course that ends with this ID
+        const courseIdPattern = new RegExp(courseIdMatch[1] + '$');
+        course = await Course.findOne({
+          _id: { $regex: courseIdPattern }
+        });
+      }
+    }
+
+    if (!course) {
+      return res.status(404).json({
+        message: 'Course not found. Please check the course link and try again.'
+      });
+    }
+
+    // Check if user is already enrolled
+    const existingEnrollment = await UserCourse.findOne({
+      userId: userId,
+      courseId: course._id,
+      status: { $in: ['enrolled', 'started', 'completed'] }
+    });
+
+    // Check if there's a pending enrollment request
+    const pendingRequest = await EnrollmentRequest.findOne({
+      userId: userId,
+      courseId: course._id,
+      status: 'pending'
+    });
+
+    res.json({
+      isEnrolled: !!existingEnrollment,
+      hasPendingRequest: !!pendingRequest
+    });
+
+  } catch (error) {
+    console.error('Error checking enrollment:', error);
+    res.status(500).json({ 
+      message: 'Error checking enrollment status. Please try again.',
+      error: error.message 
+    });
+  }
+});
+
+// Add this endpoint for updating user profile
+app.put('/api/users/profile', authenticateToken, async (req, res) => {
+  try {
+    const { avatar } = req.body;
+    
+    // Get user from token
+    const userId = req.user.userId;
+    
+    // Update user profile
+    const updatedUser = await User.findOneAndUpdate(
+      { userId: userId },
+      { 
+        $set: { 
+          avatar: avatar 
+        }
+      },
+      { new: true }
+    );
+
+    if (!updatedUser) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    // Return updated user data
+    res.json({
+      message: 'Profile updated successfully',
+      user: {
+        name: updatedUser.name,
+        email: updatedUser.email,
+        avatar: updatedUser.avatar,
+        userId: updatedUser.userId,
+        bio: updatedUser.bio,
+        displayName: updatedUser.displayName,
+        referralCount: updatedUser.referralCount
+      }
+    });
+
+  } catch (error) {
+    console.error('Error updating user profile:', error);
+    res.status(500).json({ message: 'Error updating profile' });
   }
 });

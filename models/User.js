@@ -29,9 +29,17 @@ const userSchema = new mongoose.Schema({
     enum: ['student', 'instructor', 'admin'],
     default: 'student'
   },
+  referralCount: {
+    type: Number,
+    default: 0,
+    min: 0
+  },
   displayName: String,
   avatar: {
-    type: String
+    type: String,
+    default: function() {
+      return `https://api.dicebear.com/7.x/avataaars/svg?seed=${this.userId || this._id}`;
+    }
   },
   bio: {
     type: String,

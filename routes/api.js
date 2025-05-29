@@ -1,6 +1,8 @@
 import express from 'express';
 import auth from '../middleware/auth.js';
 import QuizSubmission from '../models/QuizSubmission.js';
+import UserCourse from '../models/UserCourse.js';
+import User from '../models/User.js';
 
 const router = express.Router();
 
@@ -156,6 +158,32 @@ router.get('/quiz-submissions/:courseUrl', auth, async (req, res) => {
       message: 'Error retrieving quiz submissions',
       error: error.message
     });
+  }
+});
+
+// Get all user progress for a course
+router.get('/usercourses/course/:courseId', async (req, res) => {
+  try {
+    const { courseId } = req.params;
+    const userCourses = await UserCourse.find({ courseId });
+    res.json(userCourses);
+  } catch (error) {
+    console.error('Error fetching usercourses for course:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Get user by ID
+router.get('/users/:id', async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id).select('name _id');
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    res.json(user);
+  } catch (error) {
+    console.error('Error fetching user by ID:', error);
+    res.status(500).json({ message: 'Server error' });
   }
 });
 
