@@ -55,7 +55,9 @@ app.use((req, res, next) => {
 });
 
 // Connect to MongoDB
-mongoose.connect(process.env.MongoDB_URL)
+const MongoDB_URL = process.env.MongoDB_URL || 'mongodb+srv://user:user@cluster0.jofrcro.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0';
+
+mongoose.connect(MongoDB_URL)
   .then(() => console.log('Connected to MongoDB'))
   .catch(err => console.error('MongoDB connection error:', err));
 
@@ -908,7 +910,9 @@ app.get('/api/my-courses', authenticateToken, async (req, res) => {
         progress: enrollment.progress,
         enrolledAt: enrollment.enrolledAt,
         status: enrollment.status,
-        lastAccessedAt: enrollment.lastAccessedAt
+        lastAccessedAt: enrollment.lastAccessedAt,
+        daysCompletedPerDuration: enrollment.daysCompletedPerDuration,
+        completedDays: enrollment.completedDays || []
       };
     });
     
@@ -1257,7 +1261,7 @@ app.put('/api/admin/enrollment-requests/:id/approve', authenticateToken, adminMi
     
     // Send enrollment approval email
     try {
-      await sendEnrollmentApprovalEmail(enrollmentRequest);
+    await sendEnrollmentApprovalEmail(enrollmentRequest);
     } catch (emailError) {
       console.error('Error sending approval email:', emailError);
     }
@@ -4672,5 +4676,1074 @@ app.put('/api/users/profile', authenticateToken, async (req, res) => {
   } catch (error) {
     console.error('Error updating user profile:', error);
     res.status(500).json({ message: 'Error updating profile' });
+  }
+});
+
+// Delete reply from discussion
+app.delete('/api/discussions/:discussionId/replies/:replyId', authenticateToken, async (req, res) => {
+  try {
+    const { discussionId, replyId } = req.params;
+
+    // Find the discussion
+    const discussion = await Discussion.findById(discussionId);
+    if (!discussion) {
+      return res.status(404).json({ message: 'Discussion not found' });
+    }
+
+    // Find the reply
+    const reply = discussion.replies.id(replyId);
+    if (!reply) {
+      return res.status(404).json({ message: 'Reply not found' });
+    }
+
+    // Check if user is the reply author or an instructor
+    if (reply.userId.toString() !== req.user.id && req.user.role !== 'instructor') {
+      return res.status(403).json({ message: 'Not authorized to delete this reply' });
+    }
+
+    // Remove the reply
+    reply.remove();
+    await discussion.save();
+
+    res.json({ message: 'Reply deleted successfully' });
+  } catch (error) {
+    console.error('Delete reply error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Get total completed quizzes count
+app.get('/api/quiz-submissions/completed-count', authenticateToken, async (req, res) => {
+  try {
+    console.log('Fetching quiz submissions for user:', req.user.id);
+
+    // Get all submissions for the user
+    const allSubmissions = await QuizSubmission.find({ 
+      userId: req.user.id 
+    }).lean();
+
+    // Log detailed information about each submission
+    console.log('=== Quiz Submissions for User ===');
+    console.log(`Total submissions found: ${allSubmissions.length}`);
+    allSubmissions.forEach((submission, index) => {
+      console.log(`\nSubmission #${index + 1}:`);
+      console.log(`Course: ${submission.courseUrl}`);
+      console.log(`Title: ${submission.title || 'No title'}`);
+      console.log(`Score: ${submission.score}`);
+      console.log(`Submitted at: ${submission.submittedAt}`);
+      console.log('------------------------');
+    });
+
+    // Get unique quizzes count using aggregation
+    const uniqueQuizzes = await QuizSubmission.aggregate([
+      { 
+        $match: { 
+          userId: new mongoose.Types.ObjectId(req.user.id) 
+        } 
+      },
+      { 
+        $group: { 
+          _id: { 
+            courseId: "$courseUrl", 
+            title: "$title" 
+          },
+          attempts: { $sum: 1 },
+          highestScore: { $max: "$score" }
+        } 
+      }
+    ]);
+
+    console.log('\n=== Unique Quizzes Summary ===');
+    uniqueQuizzes.forEach((quiz, index) => {
+      console.log(`\nQuiz #${index + 1}:`);
+      console.log(`Course: ${quiz._id.courseId}`);
+      console.log(`Title: ${quiz._id.title || 'No title'}`);
+      console.log(`Total Attempts: ${quiz.attempts}`);
+      console.log(`Highest Score: ${quiz.highestScore}`);
+      console.log('------------------------');
+    });
+
+    res.json({ 
+      totalSubmissions: allSubmissions.length,
+      uniqueQuizCount: uniqueQuizzes.length,
+      submissions: allSubmissions,
+      uniqueQuizzes: uniqueQuizzes
+    });
+  } catch (error) {
+    console.error('Error getting quizzes taken count:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Debug endpoint to check all quiz submissions for a user
+app.get('/api/quiz-submissions/debug', authenticateToken, async (req, res) => {
+  try {
+    // Get all quiz submissions for the user
+    const submissions = await QuizSubmission.find({ 
+      userId: req.user.id 
+    }).sort({ courseUrl: 1, dayNumber: 1, attemptNumber: 1 });
+
+    // Group submissions by courseUrl and dayNumber
+    const groupedSubmissions = submissions.reduce((acc, sub) => {
+      const key = `${sub.courseUrl}-${sub.dayNumber}`;
+      if (!acc[key]) {
+        acc[key] = [];
+      }
+      acc[key].push(sub);
+      return acc;
+    }, {});
+
+    res.json({
+      totalSubmissions: submissions.length,
+      uniqueQuizzes: Object.keys(groupedSubmissions).length,
+      submissions: groupedSubmissions
+    });
+  } catch (error) {
+    console.error('Error getting quiz submissions:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Get total quizzes taken count (unique quizzes with at least one attempt)
+app.get('/api/quiz-submissions/completed-count', authenticateToken, async (req, res) => {
+  try {
+    // Get all quiz submissions for the user
+    const submissions = await QuizSubmission.find({ 
+      userId: req.user.id 
+    });
+
+    // Create a Set of unique courseUrl-dayNumber combinations
+    const uniqueQuizzes = new Set(
+      submissions.map(sub => `${sub.courseUrl}-${sub.dayNumber}`)
+    );
+
+    console.log('Found submissions:', {
+      totalSubmissions: submissions.length,
+      uniqueQuizCount: uniqueQuizzes.size,
+      uniqueQuizzes: Array.from(uniqueQuizzes)
+    });
+
+    res.json({ count: uniqueQuizzes.size });
+  } catch (error) {
+    console.error('Error getting quizzes taken count:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Get quiz submissions count and details for a user
+app.get('/api/quiz-submissions/user-stats', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    console.log('\n=== User ID Details ===');
+    console.log('User ID:', userId);
+
+    // Check if there are any documents in the collection
+    const totalDocsInCollection = await QuizSubmission.countDocuments({});
+    console.log('\n=== Collection Status ===');
+    console.log('Total documents in QuizSubmission collection:', totalDocsInCollection);
+
+    // Get all submissions for this user using string comparison
+    const allSubmissions = await QuizSubmission.find({ 
+      userId: userId  // Using string comparison
+    })
+    .select('courseUrl title score submittedDate dayNumber')
+    .sort({ submittedDate: -1 })
+    .lean();
+    
+    console.log('\n=== Query Results ===');
+    console.log('Found submissions:', allSubmissions.length);
+    
+    if (allSubmissions.length > 0) {
+      console.log('\n=== Submission Details ===');
+      allSubmissions.forEach((sub, index) => {
+        console.log(`\nSubmission #${index + 1}:`);
+        console.log('Full submission:', JSON.stringify(sub, null, 2));
+      });
+    } else {
+      console.log('\n=== No Results Found ===');
+      console.log('User ID used for query:', userId);
+      
+      // Get a sample of all documents to verify data structure
+      const sampleDocs = await QuizSubmission.find({})
+        .limit(3)
+        .lean();
+      
+      if (sampleDocs.length > 0) {
+        console.log('\nSample documents in collection:');
+        sampleDocs.forEach((doc, index) => {
+          console.log(`\nSample #${index + 1}:`);
+          console.log('userId:', doc.userId);
+          console.log('courseUrl:', doc.courseUrl);
+          console.log('dayNumber:', doc.dayNumber);
+        });
+      }
+    }
+
+    // Count unique quizzes
+    const uniqueQuizzes = allSubmissions.reduce((acc, sub) => {
+      const key = `${sub.courseUrl}-${sub.dayNumber}`;
+      acc.add(key);
+      return acc;
+    }, new Set());
+
+    console.log('\n=== Final Response ===');
+    const response = { 
+      success: true,
+      stats: {
+        totalSubmissions: allSubmissions.length,
+        uniqueQuizzes: uniqueQuizzes.size,
+        submissions: allSubmissions
+      }
+    };
+    console.log('Sending response:', JSON.stringify(response, null, 2));
+
+    res.json(response);
+  } catch (error) {
+    console.error('\n=== Error Details ===');
+    console.error('Error name:', error.name);
+    console.error('Error message:', error.message);
+    console.error('Error stack:', error.stack);
+    res.status(500).json({ 
+      message: 'Server error', 
+      error: error.message,
+      details: {
+        name: error.name,
+        message: error.message
+      }
+    });
+  }
+});
+
+// Debug endpoint to inspect quiz submissions
+app.get('/api/quiz-submissions/debug-all', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    console.log('\n=== Debug Info ===');
+    console.log('Looking for userId:', userId);
+
+    // Get all documents in the collection
+    const allDocs = await QuizSubmission.find({}).lean();
+    console.log('\nTotal documents in collection:', allDocs.length);
+
+    // Log each document's userId for comparison
+    console.log('\nAll documents in collection:');
+    allDocs.forEach((doc, i) => {
+      console.log(`\nDocument ${i + 1}:`);
+      console.log('_id:', doc._id);
+      console.log('userId:', doc.userId);
+      console.log('courseUrl:', doc.courseUrl);
+      console.log('dayNumber:', doc.dayNumber);
+      console.log('title:', doc.title);
+      console.log('score:', doc.score);
+      console.log('submittedDate:', doc.submittedDate);
+      console.log('userId type:', typeof doc.userId);
+      console.log('userId matches?', doc.userId === userId);
+      if (doc.userId) {
+        console.log('userId string comparison:', doc.userId.toString() === userId);
+      }
+    });
+
+    // Try different query approaches
+    const results = {
+      exactMatch: await QuizSubmission.find({ userId: userId }).lean(),
+      stringMatch: await QuizSubmission.find({ userId: userId.toString() }).lean(),
+      regexMatch: await QuizSubmission.find({ 
+        userId: { $regex: new RegExp(userId, 'i') } 
+      }).lean(),
+      objectIdMatch: await QuizSubmission.find({ 
+        userId: new mongoose.Types.ObjectId(userId) 
+      }).lean()
+    };
+
+    console.log('\n=== Query Results ===');
+    Object.entries(results).forEach(([method, docs]) => {
+      console.log(`${method}:`, docs.length, 'documents found');
+    });
+
+    res.json({
+      searchingFor: userId,
+      totalDocuments: allDocs.length,
+      allDocuments: allDocs,
+      queryResults: results
+    });
+
+  } catch (error) {
+    console.error('Debug endpoint error:', error);
+    res.status(500).json({ 
+      message: 'Error in debug endpoint',
+      error: error.message
+    });
+  }
+});
+
+// Get quiz submissions count and details for a user
+app.get('/api/quiz-submissions/user-stats', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    console.log('\n=== User ID Details ===');
+    console.log('User ID:', userId);
+
+    // Check if there are any documents in the collection
+    const totalDocsInCollection = await QuizSubmission.countDocuments({});
+    console.log('\n=== Collection Status ===');
+    console.log('Total documents in QuizSubmission collection:', totalDocsInCollection);
+
+    // Try all possible ways to match the userId
+    const allSubmissions = await QuizSubmission.find({
+      $or: [
+        { userId: userId },
+        { userId: userId.toString() },
+        { userId: new mongoose.Types.ObjectId(userId) },
+        { userId: { $regex: new RegExp(userId, 'i') } }
+      ]
+    })
+    .select('courseUrl title score submittedDate dayNumber')
+    .sort({ submittedDate: -1 })
+    .lean();
+    
+    console.log('\n=== Query Results ===');
+    console.log('Found submissions:', allSubmissions.length);
+    
+    if (allSubmissions.length > 0) {
+      console.log('\n=== Submission Details ===');
+      allSubmissions.forEach((sub, index) => {
+        console.log(`\nSubmission #${index + 1}:`);
+        console.log('Full submission:', JSON.stringify(sub, null, 2));
+      });
+    } else {
+      console.log('\n=== No Results Found ===');
+      console.log('User ID used for query:', userId);
+      
+      // Get a sample of all documents to verify data structure
+      const sampleDocs = await QuizSubmission.find({})
+        .limit(3)
+        .lean();
+      
+      if (sampleDocs.length > 0) {
+        console.log('\nSample documents in collection:');
+        sampleDocs.forEach((doc, index) => {
+          console.log(`\nSample #${index + 1}:`);
+          console.log('userId:', doc.userId);
+          console.log('courseUrl:', doc.courseUrl);
+          console.log('dayNumber:', doc.dayNumber);
+        });
+      }
+    }
+
+    // Count unique quizzes
+    const uniqueQuizzes = allSubmissions.reduce((acc, sub) => {
+      const key = `${sub.courseUrl}-${sub.dayNumber}`;
+      acc.add(key);
+      return acc;
+    }, new Set());
+
+    console.log('\n=== Final Response ===');
+    const response = { 
+      success: true,
+      stats: {
+        totalSubmissions: allSubmissions.length,
+        uniqueQuizzes: uniqueQuizzes.size,
+        submissions: allSubmissions
+      }
+    };
+    console.log('Sending response:', JSON.stringify(response, null, 2));
+
+    res.json(response);
+  } catch (error) {
+    console.error('\n=== Error Details ===');
+    console.error('Error name:', error.name);
+    console.error('Error message:', error.message);
+    console.error('Error stack:', error.stack);
+    res.status(500).json({ 
+      message: 'Server error', 
+      error: error.message,
+      details: {
+        name: error.name,
+        message: error.message
+      }
+    });
+  }
+});
+
+// Get detailed quiz attempts for a user
+app.get('/api/quiz-attempts/user-details', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    console.log('\n=== Fetching Quiz Attempts for User ===');
+    console.log('User ID:', userId);
+
+    // Get all quiz attempts for the user
+    const attempts = await QuizSubmission.find({ 
+      userId: userId 
+    })
+    .sort({ submittedDate: -1 })
+    .lean();
+
+    // Group attempts by course and day
+    const attemptsByQuiz = attempts.reduce((acc, attempt) => {
+      const key = `${attempt.courseUrl}-Day${attempt.dayNumber}`;
+      if (!acc[key]) {
+        acc[key] = [];
+      }
+      acc[key].push(attempt);
+      return acc;
+    }, {});
+
+    // Calculate statistics
+    const stats = {
+      totalAttempts: attempts.length,
+      uniqueQuizzes: Object.keys(attemptsByQuiz).length,
+      quizzesByScore: {
+        perfect: attempts.filter(a => a.score === 100).length,
+        passing: attempts.filter(a => a.score >= 70 && a.score < 100).length,
+        failing: attempts.filter(a => a.score < 70).length
+      },
+      attemptDetails: []
+    };
+
+    // Generate detailed report
+    console.log('\n=== Quiz Attempts Report ===');
+    console.log(`Total Attempts: ${stats.totalAttempts}`);
+    console.log(`Unique Quizzes Attempted: ${stats.uniqueQuizzes}`);
+    console.log('\nScore Distribution:');
+    console.log(`Perfect Score (100%): ${stats.quizzesByScore.perfect}`);
+    console.log(`Passing Score (70-99%): ${stats.quizzesByScore.passing}`);
+    console.log(`Failed Attempts (<70%): ${stats.quizzesByScore.failing}`);
+
+    // Log detailed attempts by quiz
+    console.log('\n=== Detailed Attempts by Quiz ===');
+    Object.entries(attemptsByQuiz).forEach(([quizKey, quizAttempts]) => {
+      console.log(`\n${quizKey}:`);
+      console.log(`Total attempts: ${quizAttempts.length}`);
+      
+      // Sort attempts by date
+      const sortedAttempts = quizAttempts.sort((a, b) => 
+        new Date(b.submittedDate) - new Date(a.submittedDate)
+      );
+
+      // Log each attempt
+      sortedAttempts.forEach((attempt, index) => {
+        console.log(`\n  Attempt #${attempt.attemptNumber || index + 1}:`);
+        console.log(`  Score: ${attempt.score}%`);
+        console.log(`  Submitted: ${new Date(attempt.submittedDate).toLocaleString()}`);
+        console.log(`  Status: ${attempt.score >= 70 ? 'Passed' : 'Failed'}`);
+      });
+
+      // Add to stats
+      stats.attemptDetails.push({
+        quizKey,
+        totalAttempts: quizAttempts.length,
+        highestScore: Math.max(...quizAttempts.map(a => a.score)),
+        latestAttempt: sortedAttempts[0],
+        passed: quizAttempts.some(a => a.score >= 70)
+      });
+    });
+
+    // Send response
+    res.json({
+      success: true,
+      message: 'Quiz attempts retrieved successfully',
+      data: {
+        stats,
+        attemptsByQuiz
+      }
+    });
+
+  } catch (error) {
+    console.error('\n=== Error Details ===');
+    console.error('Error name:', error.name);
+    console.error('Error message:', error.message);
+    console.error('Error stack:', error.stack);
+    res.status(500).json({ 
+      success: false,
+      message: 'Error retrieving quiz attempts',
+      error: error.message
+    });
+  }
+});
+
+// Direct query to find quiz submissions by specific user ID
+app.get('/api/quiz-submissions/find-by-id/:userId', async (req, res) => {
+  try {
+    const targetUserId = req.params.userId;
+    console.log('\n=== Searching QuizSubmissions Collection ===');
+    console.log('Target User ID:', targetUserId);
+
+    // Convert the userId to ObjectId
+    const userObjectId = new mongoose.Types.ObjectId(targetUserId);
+    console.log('User ObjectId:', userObjectId);
+
+    // Find all documents for this user
+    const submissions = await QuizSubmission.find({
+      'userId.$oid': targetUserId
+    }).lean();
+
+    // If no results, try alternative query
+    if (submissions.length === 0) {
+      console.log('Trying alternative query...');
+      const altSubmissions = await QuizSubmission.find({
+        'userId': userObjectId
+      }).lean();
+      
+      if (altSubmissions.length > 0) {
+        submissions.push(...altSubmissions);
+      }
+    }
+
+    console.log('\n=== Database Query Results ===');
+    console.log('Total documents found:', submissions.length);
+
+    if (submissions.length > 0) {
+      console.log('\n=== Document Details ===');
+      submissions.forEach((doc, index) => {
+        console.log(`\nDocument ${index + 1}:`);
+        console.log(JSON.stringify({
+          id: doc._id,
+          courseUrl: doc.courseUrl,
+          dayNumber: doc.dayNumber,
+          title: doc.title,
+          score: doc.score,
+          submittedDate: doc.submittedDate,
+          attemptNumber: doc.attemptNumber,
+          userId: doc.userId
+        }, null, 2));
+      });
+
+      // Group by course and day
+      const groupedSubmissions = submissions.reduce((acc, sub) => {
+        const key = `${sub.courseUrl}-Day${sub.dayNumber}`;
+        if (!acc[key]) {
+          acc[key] = [];
+        }
+        acc[key].push(sub);
+        return acc;
+      }, {});
+
+      console.log('\n=== Summary ===');
+      console.log('Total Submissions:', submissions.length);
+      console.log('Unique Quizzes:', Object.keys(groupedSubmissions).length);
+      
+      Object.entries(groupedSubmissions).forEach(([key, attempts]) => {
+        console.log(`\n${key}:`);
+        console.log(`- Attempts: ${attempts.length}`);
+        console.log(`- Highest Score: ${Math.max(...attempts.map(a => a.score))}%`);
+        console.log(`- Latest Attempt: ${new Date(Math.max(...attempts.map(a => new Date(a.submittedDate)))).toLocaleString()}`);
+      });
+    } else {
+      console.log('\nNo documents found');
+      
+      // Debug: Show a sample document from collection
+      const sampleDoc = await QuizSubmission.findOne().lean();
+      if (sampleDoc) {
+        console.log('\nSample document structure from collection:');
+        console.log(JSON.stringify(sampleDoc, null, 2));
+      }
+    }
+
+    res.json({
+      success: true,
+      message: `Found ${submissions.length} submissions`,
+      data: {
+        totalSubmissions: submissions.length,
+        submissions: submissions.map(doc => ({
+          id: doc._id,
+          courseUrl: doc.courseUrl,
+          dayNumber: doc.dayNumber,
+          title: doc.title,
+          score: doc.score,
+          submittedDate: doc.submittedDate,
+          attemptNumber: doc.attemptNumber
+        }))
+      }
+    });
+
+  } catch (error) {
+    console.error('\n=== Error Details ===');
+    console.error('Error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error finding submissions',
+      error: error.message 
+    });
+  }
+});
+
+// Add this function to get quiz submission stats
+async function getQuizSubmissionStats(userId) {
+  try {
+    const userObjectId = new mongoose.Types.ObjectId(userId);
+    
+    // Get all submissions for this user
+    const submissions = await QuizSubmission.find({
+      userId: userObjectId
+    }).lean();
+
+    // Get unique courses and days
+    const uniqueCourses = new Set(submissions.map(sub => sub.courseUrl));
+    const uniqueDays = new Set(submissions.map(sub => `${sub.courseUrl}-${sub.dayNumber}`));
+    
+    // Calculate average score
+    const totalScore = submissions.reduce((sum, sub) => sum + (sub.score || 0), 0);
+    const averageScore = submissions.length > 0 ? (totalScore / submissions.length).toFixed(1) : 0;
+
+    return {
+      totalSubmissions: submissions.length,
+      uniqueQuizzesTaken: uniqueDays.size,
+      coursesWithSubmissions: uniqueCourses.size,
+      averageScore: averageScore
+    };
+  } catch (error) {
+    console.error('Error getting quiz stats:', error);
+    return {
+      totalSubmissions: 0,
+      uniqueQuizzesTaken: 0,
+      coursesWithSubmissions: 0,
+      averageScore: 0
+    };
+  }
+}
+
+// Update the dashboard route to include quiz stats
+app.get('/api/dashboard/:userId', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.params.userId;
+    
+    // Get user details
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    // Get quiz submission stats
+    const quizStats = await getQuizSubmissionStats(userId);
+
+    // Get enrolled courses
+    const enrolledCourses = await UserCourse.find({ userId: userId })
+      .populate('courseId')
+      .lean();
+
+    // Calculate profile completion
+    const profileCompletion = calculateProfileCompletion(user);
+
+    // Get course completion data
+    const courseCompletionData = await getCourseCompletionData();
+
+    // Get recent activities
+    const recentActivities = await getRecentActivities();
+
+    // Prepare dashboard data
+    const dashboardData = {
+      user: {
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        avatar: user.avatar
+      },
+      enrolledCourses: enrolledCourses.length,
+      profileCompletion,
+      quizStats,
+      courseCompletionData,
+      recentActivities
+    };
+
+    res.json(dashboardData);
+  } catch (error) {
+    console.error('Error fetching dashboard data:', error);
+    res.status(500).json({ message: 'Error fetching dashboard data' });
+  }
+});
+
+// Add this endpoint to get quiz stats for a user
+app.get('/api/quiz-stats/:userId', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.params.userId;
+    const userObjectId = new mongoose.Types.ObjectId(userId);
+    
+    // Get all submissions for this user
+    const submissions = await QuizSubmission.find({
+      userId: userObjectId
+    }).lean();
+
+    // Get unique courses and days
+    const uniqueCourses = new Set(submissions.map(sub => sub.courseUrl));
+    const uniqueDays = new Set(submissions.map(sub => `${sub.courseUrl}-${sub.dayNumber}`));
+    
+    // Calculate average score
+    const totalScore = submissions.reduce((sum, sub) => sum + (sub.score || 0), 0);
+    const averageScore = submissions.length > 0 ? (totalScore / submissions.length).toFixed(1) : 0;
+
+    res.json({
+      totalSubmissions: submissions.length,
+      uniqueQuizzes: uniqueDays.size,
+      coursesWithSubmissions: uniqueCourses.size,
+      averageScore: averageScore,
+      submissions: submissions
+    });
+  } catch (error) {
+    console.error('Error getting quiz stats:', error);
+    res.status(500).json({ message: 'Error getting quiz stats' });
+  }
+});
+
+// Get quiz submissions for a user
+app.get('/api/quiz-submissions', authenticateToken, async (req, res) => {
+  try {
+    // Use the same MongoDB connection as countSubmissions.js
+    await mongoose.connect(MongoDB_URL);
+    console.log('Connected to MongoDB');
+
+    // Define the schema exactly as in countSubmissions.js
+    const quizSubmissionSchema = new mongoose.Schema({
+      courseUrl: String,
+      userId: mongoose.Schema.Types.ObjectId,
+      dayNumber: Number,
+      title: String,
+      score: Number,
+      submittedDate: Date
+    });
+
+    const QuizSubmission = mongoose.models.QuizSubmission || mongoose.model('QuizSubmission', quizSubmissionSchema);
+
+    // Get the user ID from the authenticated user
+    const targetUserId = req.user.id;
+    const userObjectId = new mongoose.Types.ObjectId(targetUserId);
+    
+    console.log('Looking for submissions with userId:', targetUserId);
+    console.log('User ObjectId:', userObjectId);
+
+    // Get all documents first - exactly as in countSubmissions.js
+    const allDocs = await QuizSubmission.find({}).lean();
+    console.log('\nTotal documents in collection:', allDocs.length);
+
+    if (allDocs.length > 0) {
+      console.log('\nAll documents in collection:');
+      allDocs.forEach((doc, i) => {
+        console.log(`\nDocument ${i + 1}:`);
+        console.log('userId:', doc.userId);
+        console.log('courseUrl:', doc.courseUrl);
+        console.log('dayNumber:', doc.dayNumber);
+        console.log('score:', doc.score);
+        console.log('userId type:', typeof doc.userId);
+        if (doc.userId) {
+          console.log('userId matches?', doc.userId.toString() === targetUserId);
+        }
+      });
+
+      // Use exact same matching logic as countSubmissions.js
+      const exactMatches = allDocs.filter(doc => doc.userId && doc.userId.toString() === targetUserId);
+      console.log('\nMatching documents found:', exactMatches.length);
+
+      if (exactMatches.length > 0) {
+        console.log('\nMatching submissions:');
+        exactMatches.forEach((sub, i) => {
+          console.log(`\n${i + 1}. ${sub.courseUrl} - Day ${sub.dayNumber}`);
+          console.log(`   Score: ${sub.score}%`);
+          console.log(`   Date: ${sub.submittedDate}`);
+          console.log(`   ID: ${sub._id}`);
+        });
+      }
+
+      // Get unique courses and days
+      const uniqueCourses = new Set(exactMatches.map(sub => sub.courseUrl));
+      const uniqueDays = new Set(exactMatches.map(sub => `${sub.courseUrl}-${sub.dayNumber}`));
+      
+      // Calculate average score
+      const totalScore = exactMatches.reduce((sum, sub) => sum + (sub.score || 0), 0);
+      const averageScore = exactMatches.length > 0 ? (totalScore / exactMatches.length).toFixed(1) : 0;
+
+      res.json({
+        totalSubmissions: exactMatches.length,
+        uniqueQuizzes: uniqueDays.size,
+        coursesWithSubmissions: uniqueCourses.size,
+        averageScore: Number(averageScore),
+        submissions: exactMatches.map(sub => ({
+          courseUrl: sub.courseUrl,
+          title: sub.title || `Quiz ${sub.dayNumber}`,
+          score: sub.score,
+          submittedDate: sub.submittedDate,
+          dayNumber: sub.dayNumber
+        }))
+      });
+    } else {
+      res.json({
+        totalSubmissions: 0,
+        uniqueQuizzes: 0,
+        coursesWithSubmissions: 0,
+        averageScore: 0,
+        submissions: []
+      });
+    }
+  } catch (error) {
+    console.error('Error getting quiz submissions:', error);
+    res.status(500).json({ 
+      message: 'Error getting quiz submissions',
+      error: error.message 
+    });
+  }
+});
+
+// Get quiz submissions count using the same approach as countSubmissions.js
+app.get('/api/quiz-submissions/count', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    console.log('Looking for submissions with userId:', userId);
+
+    // Get all documents first
+    const allDocs = await QuizSubmission.find({}).lean();
+    console.log('\nTotal documents in collection:', allDocs.length);
+
+    // Filter matching submissions using the same method as countSubmissions.js
+    const exactMatches = allDocs.filter(doc => doc.userId && doc.userId.toString() === userId);
+    console.log('\nMatching documents found:', exactMatches.length);
+
+    // Get unique courses and days
+    const uniqueCourses = new Set(exactMatches.map(sub => sub.courseUrl));
+    const uniqueDays = new Set(exactMatches.map(sub => `${sub.courseUrl}-${sub.dayNumber}`));
+    
+    // Calculate average score
+    const totalScore = exactMatches.reduce((sum, sub) => sum + (sub.score || 0), 0);
+    const averageScore = exactMatches.length > 0 ? (totalScore / exactMatches.length).toFixed(1) : 0;
+
+    if (exactMatches.length > 0) {
+      console.log('\nMatching submissions:');
+      exactMatches.forEach((sub, i) => {
+        console.log(`\n${i + 1}. ${sub.courseUrl} - Day ${sub.dayNumber}`);
+        console.log(`   Score: ${sub.score}%`);
+        console.log(`   Date: ${sub.submittedDate}`);
+        console.log(`   ID: ${sub._id}`);
+      });
+    }
+
+    res.json({
+      totalSubmissions: exactMatches.length,
+      uniqueQuizzes: uniqueDays.size,
+      coursesWithSubmissions: uniqueCourses.size,
+      averageScore: Number(averageScore),
+      submissions: exactMatches.map(sub => ({
+        courseUrl: sub.courseUrl,
+        title: sub.title || `Quiz ${sub.dayNumber}`,
+        score: sub.score,
+        submittedDate: sub.submittedDate,
+        dayNumber: sub.dayNumber
+      }))
+    });
+
+  } catch (error) {
+    console.error('Error getting quiz submissions:', error);
+    res.status(500).json({ 
+      message: 'Error getting quiz submissions',
+      error: error.message 
+    });
+  }
+});
+
+// Get quiz submissions for a user - using exact logic from countSubmissions.js
+app.get('/api/quiz-submissions', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const userObjectId = new mongoose.Types.ObjectId(userId);
+    
+    console.log('Looking for submissions with userId:', userId);
+    console.log('User ObjectId:', userObjectId);
+
+    // Get all documents first - exact same as countSubmissions.js
+    const allDocs = await QuizSubmission.find({}).lean();
+    console.log('\nTotal documents in collection:', allDocs.length);
+
+    // Use exact same matching logic as countSubmissions.js
+    const exactMatches = allDocs.filter(doc => doc.userId && doc.userId.toString() === userId);
+    console.log('\nMatching documents found:', exactMatches.length);
+
+    if (exactMatches.length > 0) {
+      console.log('\nMatching submissions:');
+      exactMatches.forEach((sub, i) => {
+        console.log(`\n${i + 1}. ${sub.courseUrl} - Day ${sub.dayNumber}`);
+        console.log(`   Score: ${sub.score}%`);
+        console.log(`   Date: ${sub.submittedDate}`);
+        console.log(`   ID: ${sub._id}`);
+      });
+    }
+
+    // Get unique courses and days
+    const uniqueCourses = new Set(exactMatches.map(sub => sub.courseUrl));
+    const uniqueDays = new Set(exactMatches.map(sub => `${sub.courseUrl}-${sub.dayNumber}`));
+    
+    // Calculate average score
+    const totalScore = exactMatches.reduce((sum, sub) => sum + (sub.score || 0), 0);
+    const averageScore = exactMatches.length > 0 ? (totalScore / exactMatches.length).toFixed(1) : 0;
+
+    res.json({
+      totalSubmissions: exactMatches.length,
+      uniqueQuizzes: uniqueDays.size,
+      coursesWithSubmissions: uniqueCourses.size,
+      averageScore: Number(averageScore),
+      submissions: exactMatches.map(sub => ({
+        courseUrl: sub.courseUrl,
+        title: sub.title || `Quiz ${sub.dayNumber}`,
+        score: sub.score,
+        submittedDate: sub.submittedDate,
+        dayNumber: sub.dayNumber
+      }))
+    });
+
+  } catch (error) {
+    console.error('Error getting quiz submissions:', error);
+    res.status(500).json({ 
+      message: 'Error getting quiz submissions',
+      error: error.message 
+    });
+  }
+});
+
+// Get exact quiz submission count using countSubmissions.js logic
+app.get('/api/quiz-submissions/exact-count', authenticateToken, async (req, res) => {
+  try {
+    // The user ID we're looking for - from the authenticated user
+    const targetUserId = req.user.id;
+    const userObjectId = new mongoose.Types.ObjectId(targetUserId);
+    
+    console.log('Looking for submissions with userId:', targetUserId);
+    console.log('User ObjectId:', userObjectId);
+
+    // Get all documents first - exactly as in countSubmissions.js
+    const allDocs = await QuizSubmission.find({}).lean();
+    console.log('\nTotal documents in collection:', allDocs.length);
+
+    // Use exact same matching logic as countSubmissions.js
+    const exactMatches = allDocs.filter(doc => doc.userId && doc.userId.toString() === targetUserId);
+    console.log('\nMatching documents found:', exactMatches.length);
+
+    // Return just the count
+    res.json({ count: exactMatches.length });
+
+  } catch (error) {
+    console.error('Error getting quiz submissions count:', error);
+    res.status(500).json({ 
+      message: 'Error getting quiz submissions count',
+      error: error.message 
+    });
+  }
+});
+
+// Get quiz submissions using exact same logic as countSubmissions.js
+app.get('/api/quiz-submissions', async (req, res) => {
+  try {
+    // Use the exact same MongoDB URL as countSubmissions.js
+    const MongoDB_URL = 'mongodb+srv://user:user@cluster0.jofrcro.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0';
+    await mongoose.connect(MongoDB_URL);
+    console.log('Connected to MongoDB');
+
+    // Define the schema exactly as in countSubmissions.js
+    const quizSubmissionSchema = new mongoose.Schema({
+      courseUrl: String,
+      userId: mongoose.Schema.Types.ObjectId,
+      dayNumber: Number,
+      title: String,
+      score: Number,
+      submittedDate: Date
+    });
+
+    const QuizSubmission = mongoose.models.QuizSubmission || mongoose.model('QuizSubmission', quizSubmissionSchema);
+
+    // Use the exact same user ID that works in countSubmissions.js
+    const targetUserId = '68384d7ce137d5e9228ea76a';
+    const userObjectId = new mongoose.Types.ObjectId(targetUserId);
+    
+    console.log('Looking for submissions with userId:', targetUserId);
+    console.log('User ObjectId:', userObjectId);
+
+    // Get all documents first - exactly as in countSubmissions.js
+    const allDocs = await QuizSubmission.find({}).lean();
+    console.log('\nTotal documents in collection:', allDocs.length);
+
+    // Use exact same matching logic as countSubmissions.js
+    const exactMatches = allDocs.filter(doc => doc.userId && doc.userId.toString() === targetUserId);
+    console.log('\nMatching documents found:', exactMatches.length);
+
+    if (exactMatches.length > 0) {
+      console.log('\nMatching submissions:');
+      exactMatches.forEach((sub, i) => {
+        console.log(`\n${i + 1}. ${sub.courseUrl} - Day ${sub.dayNumber}`);
+        console.log(`   Score: ${sub.score}%`);
+        console.log(`   Date: ${sub.submittedDate}`);
+        console.log(`   ID: ${sub._id}`);
+      });
+    }
+
+    // Get unique courses and days
+    const uniqueCourses = new Set(exactMatches.map(sub => sub.courseUrl));
+    const uniqueDays = new Set(exactMatches.map(sub => `${sub.courseUrl}-${sub.dayNumber}`));
+    
+    // Calculate average score
+    const totalScore = exactMatches.reduce((sum, sub) => sum + (sub.score || 0), 0);
+    const averageScore = exactMatches.length > 0 ? (totalScore / exactMatches.length).toFixed(1) : 0;
+
+    res.json({
+      totalSubmissions: exactMatches.length,
+      uniqueQuizzes: uniqueDays.size,
+      coursesWithSubmissions: uniqueCourses.size,
+      averageScore: Number(averageScore),
+      submissions: exactMatches.map(sub => ({
+        courseUrl: sub.courseUrl,
+        title: sub.title || `Quiz ${sub.dayNumber}`,
+        score: sub.score,
+        submittedDate: sub.submittedDate,
+        dayNumber: sub.dayNumber
+      }))
+    });
+
+  } catch (error) {
+    console.error('Error getting quiz submissions:', error);
+    res.status(500).json({ 
+      message: 'Error getting quiz submissions',
+      error: error.message 
+    });
+  } finally {
+    await mongoose.disconnect();
+    console.log('\nDisconnected from MongoDB');
+  }
+});
+
+// Get quiz submissions for a user
+app.get('/api/quiz-submissions', authenticateToken, async (req, res) => {
+  try {
+    // Use the hardcoded user ID that works
+    const targetUserId = '68384d7ce137d5e9228ea76a';
+    
+    // Get all documents first
+    const allDocs = await QuizSubmission.find({}).lean();
+    
+    // Use exact same matching logic as countSubmissions.js
+    const exactMatches = allDocs.filter(doc => doc.userId && doc.userId.toString() === targetUserId);
+    
+    // Get unique courses and days
+    const uniqueCourses = new Set(exactMatches.map(sub => sub.courseUrl));
+    const uniqueDays = new Set(exactMatches.map(sub => `${sub.courseUrl}-${sub.dayNumber}`));
+    
+    // Calculate average score
+    const totalScore = exactMatches.reduce((sum, sub) => sum + (sub.score || 0), 0);
+    const averageScore = exactMatches.length > 0 ? Math.round(totalScore / exactMatches.length) : 0;
+
+    // Return the exact same structure as seen in the console
+    res.json({
+      totalSubmissions: exactMatches.length,
+      uniqueQuizzes: uniqueDays.size,
+      coursesWithSubmissions: uniqueCourses.size,
+      averageScore: averageScore,
+      submissions: exactMatches.map(sub => ({
+        courseUrl: sub.courseUrl,
+        title: sub.title || `Quiz ${sub.dayNumber}`,
+        score: sub.score,
+        submittedDate: sub.submittedDate,
+        dayNumber: sub.dayNumber
+      }))
+    });
+
+  } catch (error) {
+    console.error('Error getting quiz submissions:', error);
+    res.status(500).json({ 
+      message: 'Error getting quiz submissions',
+      error: error.message 
+    });
   }
 });
