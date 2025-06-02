@@ -47,12 +47,12 @@ router.post('/quiz-submissions', auth, async (req, res) => {
       });
     }
 
-    // Check if already completed
-    const hasCompleted = existingAttempts.some(attempt => attempt.isCompleted);
-    if (hasCompleted) {
+    // Check if already completed with perfect score
+    const hasPerfectScore = existingAttempts.some(attempt => attempt.score === 100);
+    if (hasPerfectScore) {
       return res.status(400).json({
-        message: 'Quiz already completed successfully',
-        error: 'already_completed'
+        message: 'Quiz already completed with perfect score',
+        error: 'perfect_score_achieved'
       });
     }
 
@@ -188,34 +188,38 @@ router.get('/quiz-submissions/:courseUrl', auth, async (req, res) => {
   try {
     const { courseUrl } = req.params;
     
+    // Remove the userId filter to get submissions from all users
     const submissions = await QuizSubmission.find({
-      userId: req.user._id,
-      courseUrl
+      courseUrl,
+      isCompleted: true // Only get completed submissions
     }).sort({ dayNumber: 1, attemptNumber: -1 });
 
-    // Group submissions by dayNumber but keep all attempts
-    const submissionsByDay = submissions.reduce((acc, submission) => {
-      const dayNumber = submission.dayNumber;
-      if (!acc[dayNumber]) {
-        acc[dayNumber] = [];
+    // Group submissions by user and calculate their average scores
+    const submissionsByUser = submissions.reduce((acc, submission) => {
+      const userId = submission.userId.toString();
+      if (!acc[userId]) {
+        acc[userId] = [];
       }
-      acc[dayNumber].push(submission);
+      acc[userId].push(submission);
       return acc;
     }, {});
 
-    // Convert to array and sort attempts by attemptNumber in descending order
-    const allSubmissions = Object.values(submissionsByDay)
-      .flat()
-      .sort((a, b) => {
-        if (a.dayNumber === b.dayNumber) {
-          return b.attemptNumber - a.attemptNumber; // Sort attempts in descending order
-        }
-        return a.dayNumber - b.dayNumber; // Sort days in ascending order
-      });
+    // Calculate average scores for each user
+    const userScores = Object.entries(submissionsByUser).map(([userId, userSubmissions]) => {
+      const totalScore = userSubmissions.reduce((sum, sub) => sum + sub.score, 0);
+      const averageScore = Math.round((totalScore / userSubmissions.length) * 10) / 10;
+      
+      return {
+        userId,
+        submissions: userSubmissions,
+        averageScore,
+        totalAttempts: userSubmissions.length
+      };
+    });
 
     res.status(200).json({
       message: 'Quiz submissions retrieved successfully',
-      data: allSubmissions
+      data: userScores
     });
   } catch (error) {
     console.error('Error retrieving quiz submissions:', error);
@@ -241,7 +245,7 @@ router.get('/usercourses/course/:courseId', async (req, res) => {
 // Get user by ID
 router.get('/users/:id', async (req, res) => {
   try {
-    const user = await User.findById(req.params.id).select('name _id');
+    const user = await User.findById(req.params.id).select('name _id userId');
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
     }
@@ -249,6 +253,165 @@ router.get('/users/:id', async (req, res) => {
   } catch (error) {
     console.error('Error fetching user by ID:', error);
     res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Add this new route for the leaderboard
+router.get('/leaderboard/students', async (req, res) => {
+  try {
+    // Get all students with their avatars and userId
+    const students = await User.find({ role: 'student' })
+      .select('name _id avatar avatarUrl userId')
+      .lean();
+
+    // First pipeline: Get course progress
+    const studentProgress = await UserCourse.aggregate([
+      {
+        $addFields: {
+          progressParts: {
+            $cond: {
+              if: { $ne: ['$daysCompletedPerDuration', null] },
+              then: { $split: ['$daysCompletedPerDuration', '/'] },
+              else: ['0', '1']
+            }
+          }
+        }
+      },
+      {
+        $addFields: {
+          progressPercentage: {
+            $cond: {
+              if: {
+                $and: [
+                  { $ne: [{ $arrayElemAt: ['$progressParts', 1] }, '0'] },
+                  { $ne: [{ $arrayElemAt: ['$progressParts', 1] }, null] }
+                ]
+              },
+              then: {
+                $multiply: [
+                  {
+                    $divide: [
+                      { $toDouble: { $arrayElemAt: ['$progressParts', 0] } },
+                      { $toDouble: { $arrayElemAt: ['$progressParts', 1] } }
+                    ]
+                  },
+                  100
+                ]
+              },
+              else: 0
+            }
+          }
+        }
+      },
+      {
+        $group: {
+          _id: '$userId',
+          coursesEnrolled: { $sum: 1 },
+          averageProgress: { $avg: '$progressPercentage' }
+        }
+      }
+    ]);
+
+    // Second pipeline: Get quiz scores
+    const quizScores = await QuizSubmission.aggregate([
+      {
+        $match: {
+          isCompleted: true
+        }
+      },
+      {
+        $group: {
+          _id: '$userId',
+          averageScore: { $avg: '$score' }
+        }
+      }
+    ]);
+
+    // Create maps for both course progress and quiz scores
+    const progressMap = new Map(
+      studentProgress.map(item => [
+        item._id.toString(),
+        {
+          coursesEnrolled: item.coursesEnrolled,
+          coursePoints: Math.round(item.averageProgress || 0)
+        }
+      ])
+    );
+
+    const quizMap = new Map(
+      quizScores.map(item => [
+        item._id.toString(),
+        Math.round(item.averageScore || 0)
+      ])
+    );
+
+    const generateAvatarUrl = (name) => {
+      return `https://api.dicebear.com/7.x/avataaars/svg?seed=${name}`;
+    };
+
+    const studentList = students.map(student => {
+      const progressData = progressMap.get(student._id.toString()) || { coursesEnrolled: 0, coursePoints: 0 };
+      const quizPoints = quizMap.get(student._id.toString()) || 0;
+      const totalPoints = progressData.coursePoints + quizPoints;
+
+      // Use avatarUrl if it exists, then fall back to avatar field, then generate from name
+      const avatarUrl = student.avatarUrl || student.avatar || generateAvatarUrl(student.name);
+
+      return {
+        userId: student.userId || student._id.toString(), // Use userId from users collection
+        name: student.name,
+        avatar: avatarUrl,
+        metrics: {
+          coursesEnrolled: progressData.coursesEnrolled,
+          coursePoints: progressData.coursePoints,
+          quizPoints: quizPoints,
+          totalPoints: totalPoints
+        }
+      };
+    });
+
+    // Sort by total points (highest to lowest)
+    studentList.sort((a, b) => b.metrics.totalPoints - a.metrics.totalPoints);
+
+    // Reassign ranks after sorting
+    studentList.forEach((student, index) => {
+      student.rank = index + 1;
+    });
+
+    res.json(studentList);
+  } catch (error) {
+    console.error('Error fetching students:', error);
+    res.status(500).json({ message: 'Error fetching students' });
+  }
+});
+
+// Update user avatar
+router.put('/users/avatar', auth, async (req, res) => {
+  try {
+    const { avatarUrl } = req.body;
+
+    if (!avatarUrl) {
+      return res.status(400).json({ message: 'Avatar URL is required' });
+    }
+
+    // Update user's avatar
+    const user = await User.findByIdAndUpdate(
+      req.user._id,
+      { avatarUrl },
+      { new: true }
+    ).select('-password');
+
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    res.json({
+      message: 'Avatar updated successfully',
+      user
+    });
+  } catch (error) {
+    console.error('Error updating avatar:', error);
+    res.status(500).json({ message: 'Error updating avatar' });
   }
 });
 

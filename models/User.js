@@ -41,6 +41,10 @@ const userSchema = new mongoose.Schema({
       return `https://api.dicebear.com/7.x/avataaars/svg?seed=${this.userId || this._id}`;
     }
   },
+  avatarUrl: {
+    type: String,
+    default: ''
+  },
   bio: {
     type: String,
     maxlength: 500
@@ -105,6 +109,10 @@ const userSchema = new mongoose.Schema({
       enum: ['light', 'dark'],
       default: 'light'
     }
+  },
+  createdAt: {
+    type: Date,
+    default: Date.now
   }
 }, {
   timestamps: true
@@ -127,7 +135,24 @@ userSchema.pre('save', async function(next) {
       this.userId = `TAD${generateRandomString(4)}`;
     }
   }
+  if (!this.isModified('password')) return next();
+  
+  try {
+    const salt = await bcrypt.genSalt(10);
+    this.password = await bcrypt.hash(this.password, salt);
   next();
+  } catch (error) {
+    next(error);
+  }
 });
+
+// Method to compare password
+userSchema.methods.comparePassword = async function(candidatePassword) {
+  try {
+    return await bcrypt.compare(candidatePassword, this.password);
+  } catch (error) {
+    throw error;
+  }
+};
 
 export default mongoose.model('User', userSchema);

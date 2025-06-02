@@ -5747,3 +5747,38 @@ app.get('/api/quiz-submissions', authenticateToken, async (req, res) => {
     });
   }
 });
+
+// Get instructor details by ID
+app.get('/api/instructors/:id', async (req, res) => {
+  try {
+    const instructor = await User.findOne({ 
+      _id: req.params.id,
+      role: 'instructor'
+    }).select('name email profilePicture bio instructorProfile');
+
+    if (!instructor) {
+      return res.status(404).json({ message: 'Instructor not found' });
+    }
+
+    res.json(instructor);
+  } catch (error) {
+    console.error('Get instructor error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Get instructor by ID
+app.get('/api/instructors/:id', async (req, res) => {
+  try {
+    const instructor = await User.findById(req.params.id).select('-password');
+    
+    if (!instructor || instructor.role !== 'instructor') {
+      return res.status(404).json({ message: 'Instructor not found' });
+    }
+
+    res.json(instructor);
+  } catch (error) {
+    console.error('Get instructor error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
