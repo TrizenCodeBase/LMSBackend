@@ -290,11 +290,6 @@ app.post('/api/auth/signup', async (req, res) => {
       return res.status(400).json({ message: 'Email already registered' });
     }
 
-    // Hash password
-    console.log('Hashing password...');
-    const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(password, salt);
-
     // Generate userId based on role
     const userRole = role === 'admin' ? 'admin' : 'student';
     let userId;
@@ -309,7 +304,7 @@ app.post('/api/auth/signup', async (req, res) => {
       userId,
       name,
       email,
-      password: hashedPassword,
+      password, // Use the plain password, let the model handle hashing
       role: userRole,
       displayName: name,
       status: 'active'
@@ -534,10 +529,8 @@ app.put('/api/user/password', authenticateToken, async (req, res) => {
       return res.status(400).json({ message: 'Current password is incorrect' });
     }
     
-    // Hash new password
-    const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(newPassword, salt);
-    user.password = hashedPassword;
+    // Update password - let the User model handle hashing
+    user.password = newPassword;
     
     await user.save();
     
