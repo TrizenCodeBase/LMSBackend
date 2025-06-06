@@ -51,6 +51,11 @@ const quizSubmissionSchema = new mongoose.Schema({
   },
   completedAt: {
     type: Date
+  },
+  needsLeaderboardUpdate: {
+    type: Boolean,
+    default: false,
+    index: true
   }
 }, {
   timestamps: true
@@ -87,7 +92,7 @@ quizSubmissionSchema.pre('save', async function(next) {
 
 // Add pre-save middleware to set isCompleted and completedAt based on score
 quizSubmissionSchema.pre('save', function(next) {
-  if (this.score >= 70) {
+  if (this.score >= 0) {
     this.isCompleted = true;
     this.completedAt = new Date();
   }

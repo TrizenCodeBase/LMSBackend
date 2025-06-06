@@ -63,7 +63,7 @@ router.post('/quiz-submissions', auth, async (req, res) => {
     const quizSubmission = new QuizSubmission({
       courseUrl,
       userId: req.user._id,
-      studentId: req.user._id, // Store in both fields for backward compatibility
+      studentId: req.user._id,
       dayNumber,
       title,
       questions,
@@ -71,15 +71,16 @@ router.post('/quiz-submissions', auth, async (req, res) => {
       score,
       submittedDate: new Date(submittedDate),
       attemptNumber,
-      isCompleted: score >= 70,
-      completedAt: score >= 70 ? new Date() : undefined
+      isCompleted: score >= 10,
+      completedAt: score >= 10 ? new Date() : undefined,
+      needsLeaderboardUpdate: true // Flag for leaderboard update
     });
 
     // Save to database
     await quizSubmission.save();
 
-    // If quiz is completed (score >= 70), update course progress
-    if (score >= 70) {
+    // If quiz is completed (score >= 10), update course progress
+    if (score >= 10) {
       // Get current progress
       const userCourse = await UserCourse.findOne({
         userId: req.user._id,
@@ -101,6 +102,12 @@ router.post('/quiz-submissions', auth, async (req, res) => {
           await userCourse.save();
         }
       }
+
+      // Trigger leaderboard update for this course
+      await QuizSubmission.updateMany(
+        { courseUrl },
+        { $set: { needsLeaderboardUpdate: true } }
+      );
     }
 
     // Calculate remaining attempts
@@ -115,47 +122,8 @@ router.post('/quiz-submissions', auth, async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Error saving quiz submission:', error);
-    
-    // Check for duplicate submission error
-    if (error.code === 11000) {
-      try {
-        const latestSubmission = await QuizSubmission.findOne({
-          $or: [
-            { userId: req.user._id },
-            { studentId: req.user._id }
-          ],
-          courseUrl: req.body.courseUrl,
-          dayNumber: req.body.dayNumber
-        }).sort({ attemptNumber: -1 });
-
-        if (latestSubmission && latestSubmission.attemptNumber >= MAX_ATTEMPTS) {
-          return res.status(400).json({
-            message: 'Maximum attempts reached for this quiz',
-            error: 'max_attempts_reached'
-          });
-        }
-
-        const nextAttemptNumber = latestSubmission ? latestSubmission.attemptNumber + 1 : 1;
-
-        return res.status(400).json({
-          message: 'Please try submitting again',
-          error: 'submission_conflict',
-          nextAttemptNumber,
-          remainingAttempts: MAX_ATTEMPTS - nextAttemptNumber
-        });
-      } catch (innerError) {
-        return res.status(400).json({
-          message: 'Error handling submission conflict',
-          error: 'submission_error'
-        });
-      }
-    }
-    
-    res.status(500).json({
-      message: 'Error saving quiz submission',
-      error: error.message
-    });
+    console.error('Error submitting quiz:', error);
+    res.status(500).json({ message: 'Error submitting quiz' });
   }
 });
 
