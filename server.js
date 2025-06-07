@@ -2331,6 +2331,9 @@ app.get('/api/admin/dashboard/stats', authenticateToken, adminMiddleware, async 
     const totalCourses = await Course.countDocuments();
     const activeCourses = await Course.countDocuments({ isActive: true });
     
+    // Get total enrollments count
+    const totalEnrollments = await UserCourse.countDocuments();
+    
     // Get pending enrollment requests
     const pendingEnrollments = await EnrollmentRequest.countDocuments({ status: 'pending' });
     
@@ -2404,6 +2407,7 @@ app.get('/api/admin/dashboard/stats', authenticateToken, adminMiddleware, async 
         activeCourses
       },
       enrollmentStats: {
+        totalEnrollments,
         pendingEnrollments,
         daily: dailyEnrollments,
         weekly: weeklyEnrollments,
@@ -3976,42 +3980,6 @@ app.post('/api/admin/enrollment-requests/restore', authenticateToken, adminMiddl
     });
   } catch (error) {
     console.error('Restore enrollment requests error:', error);
-    res.status(500).json({ message: 'Server error' });
-  }
-});
-
-// Admin: Get deleted enrollment requests
-app.get('/api/admin/enrollment-requests/deleted', authenticateToken, adminMiddleware, async (req, res) => {
-  try {
-    // First get deleted requests
-    const deletedRequests = await DeletedEnrollmentRequest.find()
-      .sort({ deletedAt: -1 })
-      .limit(100);
-
-    // Get unique emails from the requests
-    const emails = [...new Set(deletedRequests.map(req => req.email))];
-
-    // Find users by these emails
-    const users = await User.find({ email: { $in: emails } }, 'email name');
-
-    // Create a map of email to user details
-    const userMap = users.reduce((map, user) => {
-      map[user.email] = user;
-      return map;
-    }, {});
-
-    // Attach user details to each request
-    const enrichedRequests = deletedRequests.map(request => {
-      const user = userMap[request.email] || null;
-      return {
-        ...request.toObject(),
-        userId: user ? { _id: user._id, name: user.name, email: user.email } : null
-      };
-    });
-    
-    res.json(enrichedRequests);
-  } catch (error) {
-    console.error('Get deleted enrollment requests error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });
