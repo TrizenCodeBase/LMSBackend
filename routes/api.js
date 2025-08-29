@@ -29,12 +29,9 @@ router.post('/quiz-submissions', auth, async (req, res) => {
       return res.status(400).json({ message: 'Missing required fields' });
     }
 
-    // Check existing attempts - check both userId and studentId
+    // Check existing attempts - use only userId field
     const existingAttempts = await QuizSubmission.find({
-      $or: [
-        { userId: req.user._id },
-        { studentId: req.user._id }
-      ],
+      userId: req.user._id,
       courseUrl,
       dayNumber
     }).sort({ attemptNumber: -1 });
@@ -59,11 +56,10 @@ router.post('/quiz-submissions', auth, async (req, res) => {
     // Calculate new attempt number
     const attemptNumber = existingAttempts.length + 1;
 
-    // Create new quiz submission with both userId and studentId
+    // Create new quiz submission with consistent userId field
     const quizSubmission = new QuizSubmission({
       courseUrl,
       userId: req.user._id,
-      studentId: req.user._id,
       dayNumber,
       title,
       questions,
@@ -73,7 +69,7 @@ router.post('/quiz-submissions', auth, async (req, res) => {
       attemptNumber,
       isCompleted: score >= 10,
       completedAt: score >= 10 ? new Date() : undefined,
-      needsLeaderboardUpdate: true // Flag for leaderboard update
+      needsLeaderboardUpdate: true
     });
 
     // Save to database
@@ -93,11 +89,12 @@ router.post('/quiz-submissions', auth, async (req, res) => {
         completedDays.add(dayNumber);
         userCourse.completedDays = Array.from(completedDays).sort((a, b) => a - b);
 
-        // Update progress percentage
+        // Update progress percentage with correct total days
         const course = await Course.findOne({ courseUrl });
-        if (course) {
-          const totalDays = course.roadmap?.length || 1;
+        if (course && course.roadmap) {
+          const totalDays = course.roadmap.length;
           userCourse.progress = Math.round((completedDays.size / totalDays) * 100);
+          userCourse.daysCompletedPerDuration = `${completedDays.size}/${totalDays}`;
           userCourse.status = userCourse.progress === 100 ? 'completed' : 'started';
           await userCourse.save();
         }

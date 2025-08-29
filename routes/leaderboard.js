@@ -20,14 +20,14 @@ router.get('/students', async (req, res) => {
           _id: '$userId',
           enrolledCourses: { 
             $push: { 
-              $toString: '$courseId'  // Convert ObjectId to string
+              $toString: '$courseId'
             }
           },
           courseProgress: {
             $push: {
-              courseId: { $toString: '$courseId' },  // Convert courseId to string
+              courseId: { $toString: '$courseId' },
               progress: '$progress',
-              score: '$score'
+              score: '$progress' // Use progress as score for consistency
             }
           }
         }
@@ -42,7 +42,7 @@ router.get('/students', async (req, res) => {
       }])
     );
 
-    // Get quiz scores for each student
+    // Get quiz scores for each student using consistent userId field
     const quizScores = await QuizSubmission.aggregate([
       {
         $match: { isCompleted: true }
@@ -51,7 +51,8 @@ router.get('/students', async (req, res) => {
         $group: {
           _id: '$userId',
           totalScore: { $sum: '$score' },
-          quizCount: { $sum: 1 }
+          quizCount: { $sum: 1 },
+          averageScore: { $avg: '$score' }
         }
       }
     ]);
@@ -59,7 +60,8 @@ router.get('/students', async (req, res) => {
     const quizMap = new Map(
       quizScores.map(entry => [entry._id, {
         totalScore: entry.totalScore,
-        quizCount: entry.quizCount
+        quizCount: entry.quizCount,
+        averageScore: entry.averageScore
       }])
     );
 
@@ -67,14 +69,17 @@ router.get('/students', async (req, res) => {
     const studentList = students.map(student => {
       const userId = student._id.toString();
       const courseData = courseMap.get(userId) || { courses: [], progress: [] };
-      const quizData = quizMap.get(userId) || { totalScore: 0, quizCount: 0 };
+      const quizData = quizMap.get(userId) || { totalScore: 0, quizCount: 0, averageScore: 0 };
 
-      // Calculate course points (average of progress scores)
+      // Calculate course points (sum of progress scores)
       const coursePoints = courseData.progress.reduce((sum, course) => 
-        sum + (course.score || 0), 0) / (courseData.progress.length || 1);
+        sum + (course.score || 0), 0);
+
+      // Use average quiz score for consistency with frontend
+      const quizPoints = quizData.averageScore || 0;
 
       // Calculate total points
-      const totalPoints = coursePoints + quizData.totalScore;
+      const totalPoints = coursePoints + quizPoints;
 
       return {
         userId: student.userId || userId,
@@ -83,7 +88,7 @@ router.get('/students', async (req, res) => {
         metrics: {
           coursesEnrolled: courseData.courses.length,
           coursePoints: Math.round(coursePoints * 10) / 10,
-          quizPoints: Math.round(quizData.totalScore * 10) / 10,
+          quizPoints: Math.round(quizPoints * 10) / 10,
           totalPoints: Math.round(totalPoints * 10) / 10,
           enrolledCourses: courseData.courses
         }
